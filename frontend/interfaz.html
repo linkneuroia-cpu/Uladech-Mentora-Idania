@@ -2388,15 +2388,44 @@ function typeFilterHTML(counts,active,toggleFn){
   return `<div class="tfilter">${allBtn}${chips}</div>`;
 }
 
+// Un mismo filename puede aparecer en más de un módulo (más de una
+// "semana"). Dos casos muy distintos:
+//  · mismo fileurl en todas las apariciones -> es el MISMO archivo citado
+//    varias veces (p.ej. un libro de bibliografía usado en varias
+//    semanas) -- se muestra una sola vez, con una nota de en qué otras
+//    semanas también aparece, para no hacer marcar el mismo archivo N
+//    veces.
+//  · fileurl distinto entre apariciones -> son archivos DISTINTOS que por
+//    error de nombrado en Moodle comparten filename (visto en un curso
+//    real) -- se muestran las dos filas (el backend ya procesa ambas, ver
+//    core.py AutoCore.download_and_validate) pero con una advertencia,
+//    porque agrupar estos sería esconder contenido distinto.
+function computeRepeats(mods){
+  const byName={};
+  mods.forEach((m,mi)=>m.files.forEach(f=>{
+    if(f.is_duplicate)return;
+    (byName[f.filename]=byName[f.filename]||[]).push({mi,moduleName:m.module_name,fileurl:f.fileurl});
+  }));
+  const repeats={};
+  Object.keys(byName).forEach(fn=>{if(byName[fn].length>1)repeats[fn]=byName[fn];});
+  return repeats;
+}
+
 function aRenderTree(){
   const filter=S.auto.typeFilter;
+  const repeats=computeRepeats(S.auto.mods);
   const totalNew=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>!f.is_duplicate).length,0);
   const totalDup=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>f.is_duplicate).length,0);
   $('auto-file-cnt').textContent=`${totalNew} archivo(s) nuevo(s) en ${S.auto.mods.length} módulo(s)`+(totalDup>0?` · ${totalDup} duplicado(s) oculto(s)`:'');
   const counts=typeCounts(S.auto.mods,'files');
   $('auto-tfilter').innerHTML=typeFilterHTML(counts,filter,'aToggleType');
   $('auto-tree').innerHTML=S.auto.mods.map((mod,mi)=>{
-    const rows=mod.files.map((f,fi)=>({f,fi})).filter(({f})=>!f.is_duplicate&&(!filter||filter.has(f.file_type)));
+    const rows=mod.files.map((f,fi)=>({f,fi})).filter(({f})=>{
+      if(f.is_duplicate||(filter&&!filter.has(f.file_type)))return false;
+      const occ=repeats[f.filename];
+      if(occ&&occ.length>1&&occ.every(o=>o.fileurl===occ[0].fileurl)&&occ[0].mi!==mi)return false; // ya se muestra en su primera semana
+      return true;
+    });
     if(rows.length===0)return''; // ocultar módulos sin archivos visibles
     return`<div class="tree-mod">
       <div class="tree-mhdr" onclick="aTog(${mi})">
@@ -2408,11 +2437,21 @@ function aRenderTree(){
           const ft=fileTypeMeta(f.file_type);
           const unsupported=f.file_type==='other';
           const checked=S.auto.sel.includes(f.filename);
+          const occ=repeats[f.filename];
+          let repeatBadge='';
+          if(occ&&occ.length>1){
+            const others=occ.filter(o=>o.mi!==mi).map(o=>esc(o.moduleName));
+            const sameFile=occ.every(o=>o.fileurl===occ[0].fileurl);
+            repeatBadge=sameFile
+              ?`<span class="tag t-new" title="Mismo archivo, también enlazado en estos módulos">🔁 también en: ${others.join(', ')}</span>`
+              :`<span class="tag t-warn" title="Nombre igual pero es un archivo DISTINTO en Moodle — se procesan ambos por separado">⚠️ nombre repetido en: ${others.join(', ')} (archivo distinto)</span>`;
+          }
           return `
           <div class="tree-row">
             <input type="checkbox" id="ac${mi}_${fi}" data-fn="${esc(f.filename)}" onchange="aTick(${mi},${fi})" ${unsupported?'disabled':''} ${checked?'checked':''}>
             <label for="ac${mi}_${fi}"><span style="color:var(--red-700)">${ft.icon}</span>${esc(f.filename)}
               <span class="tag ${unsupported?'t-err':'t-new'}">${unsupported?'✕ No soportado':'✓ '+ft.label}</span>
+              ${repeatBadge}
             </label>
             <select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aSetFileSourceType(${JSON.stringify(f.filename)},this.value)' title="Tipo de contenido para el tutor">
               <option value="curso_propio" ${aFileSourceType(f.filename)==='curso_propio'?'selected':''}>🎓 Curso</option>

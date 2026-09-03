@@ -42,6 +42,20 @@ from definitions import (
 DEFAULT_SOURCE_TYPE = "curso_propio"
 
 
+def _desambiguar_filename(filename: str, resource_id: Optional[int]) -> str:
+    """Nombre distinto para la 2ª+ copia de un filename que colisiona entre
+    dos recursos de Moodle distintos (mismo nombre, contenido distinto) —
+    conserva el nombre original reconocible y le agrega el resource_id
+    antes de la extensión, tanto para el archivo en temp_docs/ (si no, la
+    segunda descarga pisaría a la primera en disco) como para el filename
+    que queda en el payload de Qdrant (si no, ambas copias se verían
+    idénticas en los resultados de búsqueda)."""
+    stem, sep, ext = filename.rpartition(".")
+    if not sep:
+        return f"{filename}__{resource_id}"
+    return f"{stem}__{resource_id}.{ext}"
+
+
 def _build_pipeline_config(collection_name: str, source_type: Optional[str]) -> Optional[PipelineConfig]:
     """
     Si la colección destino es híbrida (vectores nombrados dense+sparse),
@@ -365,32 +379,46 @@ class AutoCore:
         service = get_service(model_name)
         resources = get_course_resources(curid)
 
-        # Un mismo archivo puede estar enlazado en varias secciones/semanas
-        # de Moodle a la vez (p.ej. un libro de bibliografía usado como
-        # lectura de apoyo en varias semanas) — file_map está indexado por
-        # filename, así que hay que ACUMULAR las secciones vistas en vez de
-        # sobreescribir con la última, o se pierde la info de todas menos
-        # una.
-        file_map: Dict[str, Dict] = {}
+        # La identidad real de un archivo en Moodle es su fileurl, NO su
+        # filename: un mismo archivo puede estar enlazado en varias
+        # secciones/semanas a la vez (p.ej. un libro de bibliografía citado
+        # como lectura de apoyo en varias semanas) — eso sí hay que
+        # ACUMULARLO como un solo archivo. Pero dos archivos DISTINTOS
+        # también pueden compartir filename por un error de nombrado en
+        # Moodle (visto en un curso real: dos módulos con un PDF llamado
+        # igual) — indexar por filename nada más perdía uno de los dos en
+        # silencio (la segunda descarga pisaba a la primera en temp_docs/,
+        # ya con el mismo nombre local). Por eso se agrupa por fileurl, y
+        # se guarda aparte qué fileurls distintos comparten un mismo
+        # filename para poder desambiguarlos al procesar.
+        by_fileurl: Dict[str, Dict] = {}
+        urls_por_filename: Dict[str, List[str]] = {}
         for resource in resources:
             module_name = resource.get("name", "")
             section_name = resource.get("section_name", "")
+            resource_id = resource.get("id")
             for cf in resource.get("contentfiles", []):
                 filename = cf["filename"]
-                entry = file_map.setdefault(filename, {
-                    "fileurl":       cf["fileurl"],
+                fileurl = cf["fileurl"]
+                entry = by_fileurl.setdefault(fileurl, {
+                    "fileurl":       fileurl,
                     "course_name":   module_name,
                     "section_names": [],
                     "source":        cf.get("source"),
+                    "resource_id":   resource_id,
                 })
                 if section_name and section_name not in entry["section_names"]:
                     entry["section_names"].append(section_name)
+                urls = urls_por_filename.setdefault(filename, [])
+                if fileurl not in urls:
+                    urls.append(fileurl)
 
         summaries = []
         downloaded: List[Dict] = []
 
         for filename in selected_filenames:
-            if filename not in file_map:
+            urls = urls_por_filename.get(filename, [])
+            if not urls:
                 summaries.append(ValidationSummary(
                     filename=filename,
                     total_pages=0, total_images=0, total_tables=0,
@@ -399,46 +427,62 @@ class AutoCore:
                 ).dict())
                 continue
 
-            info = file_map[filename]
-            try:
-                if info.get("source") == "youtube":
-                    temp_path = download_youtube_audio(info["fileurl"], filename)
-                else:
-                    temp_path = download_pdf_to_temp(info["fileurl"], filename)
-                val = await validate_document(str(temp_path))
-                dup = service.check_duplicate(filename, collection_name)
+            # >1 fileurl distinto bajo el mismo nombre = colisión real (no
+            # el mismo archivo citado dos veces) — se procesan TODOS, no
+            # solo el primero, para no perder contenido en silencio. El
+            # nombre de la 2ª copia en adelante se desambigua con el
+            # resource_id (tanto para el path local como para el filename
+            # que queda en el payload de Qdrant).
+            for idx, fileurl in enumerate(urls):
+                info = by_fileurl[fileurl]
+                effective_filename = (
+                    filename if idx == 0
+                    else _desambiguar_filename(filename, info["resource_id"])
+                )
+                try:
+                    if info.get("source") == "youtube":
+                        temp_path = download_youtube_audio(fileurl, effective_filename)
+                    else:
+                        temp_path = download_pdf_to_temp(fileurl, effective_filename)
+                    val = await validate_document(str(temp_path))
+                    dup = service.check_duplicate(effective_filename, collection_name)
 
-                summaries.append(ValidationSummary(
-                    filename=filename,
-                    file_type=val["file_type"],
-                    total_pages=val["total_pages"],
-                    total_images=val["total_images"],
-                    total_tables=val["total_tables"],
-                    duration_seconds=val.get("duration_seconds"),
-                    has_non_textual=(
-                        val["total_images"] > 0 or val["total_tables"] > 0
-                    ),
-                    warning_message=val["warning_message"],
-                    is_duplicate=dup["exists"],
-                    existing_chunks=dup["total_chunks"],
-                ).dict())
+                    warning_message = val["warning_message"] or ""
+                    if idx > 0:
+                        warning_message += " (nombre repetido en Moodle en otra sección — se distingue con un sufijo)"
+                    warning_message = warning_message.strip() or None
 
-                downloaded.append({
-                    "filename":     filename,
-                    "path":         str(temp_path),
-                    "course_name":  info["course_name"],
-                    "section_name": "; ".join(info.get("section_names", [])),
-                    "total_pages":  val["total_pages"],
-                    "source_type":  file_source_types.get(filename, source_type or DEFAULT_SOURCE_TYPE),
-                })
+                    summaries.append(ValidationSummary(
+                        filename=effective_filename,
+                        file_type=val["file_type"],
+                        total_pages=val["total_pages"],
+                        total_images=val["total_images"],
+                        total_tables=val["total_tables"],
+                        duration_seconds=val.get("duration_seconds"),
+                        has_non_textual=(
+                            val["total_images"] > 0 or val["total_tables"] > 0
+                        ),
+                        warning_message=warning_message,
+                        is_duplicate=dup["exists"],
+                        existing_chunks=dup["total_chunks"],
+                    ).dict())
 
-            except Exception as e:
-                summaries.append(ValidationSummary(
-                    filename=filename,
-                    total_pages=0, total_images=0, total_tables=0,
-                    has_non_textual=False,
-                    warning_message=f"Error al descargar/validar: {e}",
-                ).dict())
+                    downloaded.append({
+                        "filename":     effective_filename,
+                        "path":         str(temp_path),
+                        "course_name":  info["course_name"],
+                        "section_name": "; ".join(info.get("section_names", [])),
+                        "total_pages":  val["total_pages"],
+                        "source_type":  file_source_types.get(filename, source_type or DEFAULT_SOURCE_TYPE),
+                    })
+
+                except Exception as e:
+                    summaries.append(ValidationSummary(
+                        filename=effective_filename,
+                        total_pages=0, total_images=0, total_tables=0,
+                        has_non_textual=False,
+                        warning_message=f"Error al descargar/validar: {e}",
+                    ).dict())
 
         job_id = _new_job(context={
             "mode":            "auto",
