@@ -382,7 +382,18 @@ async def _ocr_page_region(fitz_page, bbox: Tuple[float, float, float, float]) -
         pix.save(str(tmp_path))
         return tmp_path
 
-    tmp_path = await loop.run_in_executor(None, _render)
+    try:
+        tmp_path = await loop.run_in_executor(None, _render)
+    except Exception as e:
+        # Una región con un bounding box degenerado (detectado a veces en
+        # PDFs grandes con drawings malformados) puede hacer que MuPDF
+        # rechace el pixmap (p.ej. "Invalid bandwriter header dimensions") —
+        # sin este try, esa única región abortaba la extracción del
+        # documento COMPLETO (ver el except de _extract_from_pdf). Se trata
+        # igual que "ningún OCR reconoció nada": se omite esta región.
+        print(f"⚠️ No se pudo renderizar una región para OCR, se omite: {e}")
+        return ""
+
     try:
         try:
             from PIL import Image
