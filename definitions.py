@@ -39,7 +39,7 @@ import yt_dlp
 # Vectorización
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 from qdrant_client.models import (
     Distance, VectorParams, PointStruct,
     Filter, FieldCondition, MatchValue
@@ -984,6 +984,11 @@ class VectorizationService:
         print(f"   Dimensión       : {self._vector_size}")
         print(f"   Proveedor       : {self._provider}")
 
+        self._azure_client   = None
+        self._azure_deployment = None
+        self._openai_client  = None
+        self._openai_model   = None
+
         if self._provider == "azure":
             self._model        = None
             self._azure_client = AzureOpenAI(
@@ -994,9 +999,16 @@ class VectorizationService:
             self._azure_deployment = settings.AZURE_EMBEDDING_DEPLOYMENT
             print(f"   Endpoint Azure  : {settings.AZURE_EMBEDDING_ENDPOINT}")
             print(f"   Deployment      : {self._azure_deployment}")
+        elif self._provider == "openai":
+            # OpenAI API directa (no Azure) — mismo modelo pero sin pasar por
+            # un deployment de Azure. model_name trae el prefijo "openai/"
+            # (para distinguirlo del catálogo del mismo nombre bajo Azure);
+            # la API de OpenAI espera el nombre sin ese prefijo.
+            self._model         = None
+            self._openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            self._openai_model  = self._model_name.split("/", 1)[-1]
+            print(f"   Modelo OpenAI   : {self._openai_model}")
         else:
-            self._azure_client     = None
-            self._azure_deployment = None
             print(f"   Usa prefijos    : {self._use_prefix}")
             print(f"   Usa task LoRA   : {self._use_task}")
             self._model = SentenceTransformer(
@@ -1221,6 +1233,24 @@ class VectorizationService:
                     results.extend([item.embedding for item in response.data])
                 return results
             return await _azure_embed()
+
+        if self._provider == "openai":
+            # OpenAI Embeddings API directa — mismo esquema de batching que Azure.
+            async def _openai_embed() -> List[List[float]]:
+                results = []
+                batch_size = 100
+                for i in range(0, len(texts), batch_size):
+                    batch = texts[i:i + batch_size]
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda b=batch: self._openai_client.embeddings.create(
+                            model=self._openai_model,
+                            input=b,
+                        )
+                    )
+                    results.extend([item.embedding for item in response.data])
+                return results
+            return await _openai_embed()
 
         if self._use_task:
             # Jina Embeddings v3

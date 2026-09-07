@@ -365,6 +365,14 @@ async def qdrant_create_collection(req: CollectionCreateRequest):
         rd = await db.run(rds.get_rd, req.rd_id)
         if not rd:
             raise HTTPException(400, f"La RD {req.rd_id} no existe")
+        if req.moodle_courseid is None:
+            raise HTTPException(400, "moodle_courseid es obligatorio para una colección con RD")
+
+    # Colección "normal" (sin RD) sin curso de Moodle detrás (p.ej. un
+    # asistente institucional tipo FAQ) -> sentinel 0 ("sin curso"). Sigue
+    # siendo un INTEGER NOT NULL en `colecciones`, así que 0 evita una
+    # migración de esquema mientras deja la intención clara.
+    moodle_courseid = req.moodle_courseid if req.moodle_courseid is not None else 0
 
     if req.vector_schema == "hybrid":
         if rd and rd.get("dense_strategy"):
@@ -402,7 +410,7 @@ async def qdrant_create_collection(req: CollectionCreateRequest):
         raise HTTPException(500, str(e))
 
     try:
-        await db.run(rds.link_collection, req.name, req.rd_id, req.moodle_courseid, req.vector_schema)
+        await db.run(rds.link_collection, req.name, req.rd_id, moodle_courseid, req.vector_schema)
         if lock_in_embedding:
             await db.run(rds.set_embedding, req.rd_id, *lock_in_embedding)
     except ValueError as e:
@@ -629,6 +637,8 @@ _ASISTENTE_STRATEGY_FIELDS = (
     "contextual_strategy",
     "rerank_strategy",
     "generation_strategy",
+    "dense_strategy",
+    "sparse_strategy",
 )
 
 
@@ -642,14 +652,19 @@ class AsistenteCreateRequest(BaseModel):
     # Config RAG propia del asistente — None/omitido = usa el valor por
     # defecto del sistema. etl_document/etl_audio/contextual también se
     # consultan automáticamente al vectorizar (ver core._build_pipeline_config).
-    # dense/sparse NO van aquí: son el embedding maestro de la RD
-    # (rds.dense_strategy/sparse_strategy) — todas las colecciones de una
-    # RD deben compartirlo, así que el asistente solo lo hereda/muestra.
+    # dense/sparse: con RD, son el embedding maestro de la RD
+    # (rds.dense_strategy/sparse_strategy) y estos campos se ignoran. Sin
+    # RD ("normal"), SÍ tienen efecto — una colección "normal" no persiste
+    # su propio embedding en ningún otro lado, así que deben coincidir con
+    # el que se usó para crear/elegir la colección de este asistente (ver
+    # asistente_enviar_mensaje).
     etl_document_strategy: Optional[str] = None
     etl_audio_strategy: Optional[str] = None
     contextual_strategy: Optional[str] = None
     rerank_strategy: Optional[str] = None
     generation_strategy: Optional[str] = None
+    dense_strategy: Optional[str] = None
+    sparse_strategy: Optional[str] = None
     # None/omitido = "soy {nombre}. Pregúntame lo que necesites sobre el
     # curso." — se agrega después de "Hola {nombre del alumno}, ".
     mensaje_bienvenida: Optional[str] = None
@@ -675,6 +690,8 @@ class AsistenteUpdateRequest(BaseModel):
     contextual_strategy: Optional[str] = None
     rerank_strategy: Optional[str] = None
     generation_strategy: Optional[str] = None
+    dense_strategy: Optional[str] = None
+    sparse_strategy: Optional[str] = None
     mensaje_bienvenida: Optional[str] = None
     mensaje_reencuentro: Optional[str] = None
     max_actividades_sesion: Optional[int] = None
@@ -802,7 +819,12 @@ def _build_asistente_context(
 
 
 @app.get("/asistente/{token}", response_class=HTMLResponse, tags=["Asistente público"])
-async def asistente_chat_page(token: str, request: Request, courseid: int = Query(...), userid: int = Query(...)):
+async def asistente_chat_page(
+    token: str,
+    request: Request,
+    courseid: int = Query(0, description="Opcional para asistentes 'normal' sin curso — sentinel 0 si se omite."),
+    userid: int = Query(...),
+):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         return templates.TemplateResponse(
@@ -917,16 +939,20 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
     # dense/sparse son el embedding maestro de la RD (no del asistente):
     # todas las colecciones de la RD deben compartirlo para que un mismo
     # asistente pueda responder con cualquiera de ellas indistintamente.
-    # Para un asistente "normal" (sin RD) no hay embedding maestro que
-    # heredar — usa el valor por defecto del sistema (rd={}).
+    # Para un asistente "normal" (sin RD) no hay RD de la que heredarlo —
+    # y a diferencia de una RD, una colección "normal" no persiste su
+    # propio embedding en ningún otro lado una vez creada, así que cae al
+    # dense/sparse_strategy fijado en el propio asistente al crearlo (ver
+    # assistants.create_asistente). Si tampoco hay eso, recién ahí usa el
+    # valor por defecto del sistema.
     rd = await db.run(rds.get_rd_for_collection, sesion["qdrant_collection_name"]) or {}
 
     try:
         result = await rag_pipeline.answer_query(
             collection_name=sesion["qdrant_collection_name"],
             query=req.pregunta,
-            dense_strategy_name=rd.get("dense_strategy"),
-            sparse_strategy_name=rd.get("sparse_strategy"),
+            dense_strategy_name=rd.get("dense_strategy") or asistente.get("dense_strategy"),
+            sparse_strategy_name=rd.get("sparse_strategy") or asistente.get("sparse_strategy"),
             rerank_strategy_name=asistente.get("rerank_strategy"),
             generation_strategy_name=asistente.get("generation_strategy"),
             extra_system_prompt=_build_asistente_context(asistente, rd, sesion.get("moodle_fullname")),
@@ -1810,12 +1836,14 @@ async def rag_answer(req: RagAnswerRequest):
             )
         # La config propia del asistente aplica salvo que el request la
         # override explícitamente (así "Prueba de Asistente" prueba
-        # exactamente lo que respondería en público). dense/sparse son el
-        # embedding maestro de la RD, no del asistente.
-        rd = await db.run(rds.get_rd, asistente["rd_id"]) or {}
+        # exactamente lo que respondería en público). dense/sparse: con RD
+        # es el embedding maestro de la RD; sin RD ("normal"), cae al
+        # dense/sparse_strategy fijado en el propio asistente (mismo
+        # fallback que asistente_enviar_mensaje).
+        rd = (await db.run(rds.get_rd, asistente["rd_id"]) or {}) if asistente["rd_id"] is not None else {}
         extra_system_prompt = _build_asistente_context(asistente, rd)
-        dense_strategy = dense_strategy or rd.get("dense_strategy")
-        sparse_strategy = sparse_strategy or rd.get("sparse_strategy")
+        dense_strategy = dense_strategy or rd.get("dense_strategy") or asistente.get("dense_strategy")
+        sparse_strategy = sparse_strategy or rd.get("sparse_strategy") or asistente.get("sparse_strategy")
         rerank_strategy = rerank_strategy or asistente.get("rerank_strategy")
         generation_strategy = generation_strategy or asistente.get("generation_strategy")
 

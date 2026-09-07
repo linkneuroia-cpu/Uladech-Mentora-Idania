@@ -56,7 +56,9 @@ def _desambiguar_filename(filename: str, resource_id: Optional[int]) -> str:
     return f"{stem}__{resource_id}.{ext}"
 
 
-def _build_pipeline_config(collection_name: str, source_type: Optional[str]) -> Optional[PipelineConfig]:
+def _build_pipeline_config(
+    collection_name: str, source_type: Optional[str], fallback_dense_strategy: Optional[str] = None,
+) -> Optional[PipelineConfig]:
     """
     Si la colección destino es híbrida (vectores nombrados dense+sparse),
     arma automáticamente el PipelineConfig. ETL/audio/contextual usan
@@ -71,6 +73,16 @@ def _build_pipeline_config(collection_name: str, source_type: Optional[str]) -> 
     congelada en Postgres o default de .env). El usuario no arma nada
     manualmente: los 3 mecanismos de vectorización no cambian su UI, solo
     consultan automáticamente antes de vectorizar.
+
+    `fallback_dense_strategy`: para una colección "normal" (sin RD) no hay
+    ningún "embedding maestro" persistido — sin esto, cualquier colección
+    normal híbrida ignoraba en silencio el modelo elegido al subir/crear
+    (`model_name`) y usaba el default GLOBAL del sistema, lo que rompía
+    con un "Vector dimension error" de Qdrant apenas ese default no
+    coincidía con la dimensión real de la colección. El caller pasa el
+    `model_name` de esta operación puntual como red de seguridad; solo se
+    usa cuando no hay RD (si la hay, `rd.get("dense_strategy")` sigue
+    ganando siempre, sin cambios).
 
     Si la colección es legacy (vector único sin nombre) o no se puede
     determinar su esquema (aún no existe, error de conexión), retorna None
@@ -113,7 +125,7 @@ def _build_pipeline_config(collection_name: str, source_type: Optional[str]) -> 
         etl_document_strategy=pick("etl_document", "etl_document_strategy"),
         etl_audio_strategy=pick("etl_audio", "etl_audio_strategy"),
         contextual_strategy=pick("contextual", "contextual_strategy"),
-        dense_strategy=rd.get("dense_strategy") or active["dense"],
+        dense_strategy=rd.get("dense_strategy") or fallback_dense_strategy or active["dense"],
         sparse_strategy=rd.get("sparse_strategy") or active["sparse"],
         source_type=source_type or DEFAULT_SOURCE_TYPE,
     )
@@ -257,7 +269,7 @@ class SemiAutoCore:
 
         # Recupera (o crea) el servicio con el modelo guardado en el context
         service = get_service(model_name)
-        pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"))
+        pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"), fallback_dense_strategy=model_name)
         results = []
 
         for fd in ctx["files"]:
@@ -523,7 +535,7 @@ class AutoCore:
         # el source_type se sobreescribe por archivo abajo, ya que cada
         # documento de Moodle puede haberse marcado individualmente como
         # "curso_propio" o "bibliografia" en el paso 3 del asistente.
-        base_pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"))
+        base_pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"), fallback_dense_strategy=model_name)
         results = []
 
         # Cola de indexación (ver ledger.py): registra altas/modificaciones/
@@ -778,7 +790,7 @@ class UpdateCore:
         file_path           = Path(fd["path"])
 
         service = get_service(model_name)
-        pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"))
+        pipeline_config = _build_pipeline_config(collection_name, ctx.get("source_type"), fallback_dense_strategy=model_name)
 
         try:
             del_result = service.delete_document(filename_to_replace, collection_name)

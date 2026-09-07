@@ -1677,7 +1677,7 @@ async function asisLoad(){
     tbl.innerHTML=list.map(a=>`
       <tr>
         <td><strong>${esc(a.nombre)}</strong></td>
-        <td>${a.tipo==='rd'?esc(a.rd_nombre||'—'):`<span class="muted">📦 Normal · curso ${a.moodle_courseid}</span>`}</td>
+        <td>${a.tipo==='rd'?esc(a.rd_nombre||'—'):`<span class="muted">📦 Normal · ${a.moodle_courseid?`curso ${a.moodle_courseid}`:'sin curso (institucional)'}</span>`}</td>
         <td>${a.activo?'<span class="tag t-new">Activo</span>':'<span class="tag t-warn">Inactivo</span>'}</td>
         <td><a href="${esc(a.public_url)}" target="_blank" style="font-family:monospace;font-size:11px">${esc(a.public_url)}</a></td>
         <td>${a.calificaciones_total
@@ -1724,7 +1724,7 @@ let ASIS_WIZ=null;
 async function asisWizardOpen(){
   ASIS_WIZ={
     step:1,maxStep:1,nombre:'',token:null,tipo:'rd',rd_id:null,rds:[],
-    normalCourseId:null,normalCourseName:null,normalCollection:null,
+    normalTieneCurso:true,normalCourseId:null,normalCourseName:null,normalCollection:null,
     promptMaestro:'',mensajeBienvenida:'',mensajeReencuentro:'',maxActividades:10,
     cfg:{},
   };
@@ -1819,13 +1819,14 @@ function asisWizStep2HTML(){
 
 function asisWizStep3HTML(){
   if(ASIS_WIZ.tipo==='normal'){
-    return `<div class="fg"><label class="fl">Course ID de Moodle <span class="req">*</span></label>
-        <div style="display:flex;gap:8px">
-          <input class="fc" type="number" id="wiz-normal-courseid" value="${ASIS_WIZ.normalCourseId||''}" placeholder="Ej: 1396">
-          <button class="btn btn-out btn-sm" style="white-space:nowrap" id="wiz-normal-btn" onclick="asisWizSetNormalCourse()">Buscar</button>
-        </div>
-        <div class="fh">Este asistente "normal" responde solo para este curso. Si no existe todavía una colección para él, se crea acá mismo con los valores por defecto del sistema.</div>
+    return `<div class="fg">
+        <label class="fl" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+          <input type="checkbox" id="wiz-normal-tiene-curso" ${ASIS_WIZ.normalTieneCurso?'checked':''} onchange="asisWizToggleNormalCurso(this.checked)">
+          Vincular a un curso de Moodle
+        </label>
+        <div class="fh">Sin marcar: asistente institucional sin curso detrás (p.ej. un FAQ general) — elegís vos el nombre de su colección, en vez de tomarlo de un Course ID.</div>
       </div>
+      <div id="wiz-normal-course-box">${asisWizNormalCourseBoxHTML()}</div>
       <div id="wiz-normal-status" class="fh"></div>`;
   }
   return `<div id="wiz-courses-list"><p class="muted">Cargando…</p></div>
@@ -1891,6 +1892,76 @@ async function asisWizAddCourse(){
     status.innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
   }finally{
     btnEl.disabled=false;btnEl.textContent='Buscar y crear';
+  }
+}
+
+function asisWizNormalCourseBoxHTML(){
+  if(ASIS_WIZ.normalTieneCurso){
+    return `<div class="fg"><label class="fl">Course ID de Moodle <span class="req">*</span></label>
+        <div style="display:flex;gap:8px">
+          <input class="fc" type="number" id="wiz-normal-courseid" value="${ASIS_WIZ.normalCourseId||''}" placeholder="Ej: 1396">
+          <button class="btn btn-out btn-sm" style="white-space:nowrap" id="wiz-normal-btn" onclick="asisWizSetNormalCourse()">Buscar</button>
+        </div>
+        <div class="fh">Este asistente "normal" responde solo para este curso. Si no existe todavía una colección para él, se crea acá mismo con los valores por defecto del sistema.</div>
+      </div>`;
+  }
+  return `<div class="fg"><label class="fl">Nombre de la colección <span class="req">*</span></label>
+      <div style="display:flex;gap:8px">
+        <input class="fc" id="wiz-normal-collname" value="${esc(ASIS_WIZ.normalCollection||'')}" placeholder="Ej: COLECCION_ULADECH_INFO">
+        <button class="btn btn-out btn-sm" style="white-space:nowrap" id="wiz-normal-btn" onclick="asisWizSetNormalSinCurso()">Usar / crear</button>
+      </div>
+      <div class="fh">Sin curso de Moodle: el chat público de este asistente solo pedirá un código de estudiante (userid), no un Course ID. Si la colección ya existe con ese nombre exacto, se reutiliza; si no, se crea vacía con los valores por defecto del sistema.</div>
+    </div>`;
+}
+
+function asisWizToggleNormalCurso(checked){
+  ASIS_WIZ.normalTieneCurso=checked;
+  ASIS_WIZ.normalCourseId=null;ASIS_WIZ.normalCourseName=null;ASIS_WIZ.normalCollection=null;
+  $('wiz-normal-course-box').innerHTML=asisWizNormalCourseBoxHTML();
+  $('wiz-normal-status').innerHTML='';
+}
+
+async function asisWizSetNormalSinCurso(){
+  const name=$('wiz-normal-collname').value.trim();
+  const status=$('wiz-normal-status');
+  const btnEl=$('wiz-normal-btn');
+  if(!name){asisWizError('Ingresa un nombre de colección.');return;}
+  btnEl.disabled=true;btnEl.textContent='Buscando…';
+  status.innerHTML='<span class="muted">Consultando…</span>';
+  try{
+    const existing=(await api('{{ URL_PREFIX }}/api/collections?detail=true')).collections||[];
+    let col=existing.find(c=>c.name===name);
+    if(!col){
+      status.innerHTML='<span class="muted">No existe todavía — creándola con los valores por defecto…</span>';
+      const [denseInfo,sparseInfo]=await Promise.all([
+        api('{{ URL_PREFIX }}/api/config/dense'), api('{{ URL_PREFIX }}/api/config/sparse'),
+      ]);
+      const created=await api('{{ URL_PREFIX }}/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        name, vector_schema:'hybrid', dense_strategy:denseInfo.current, sparse_strategy:sparseInfo.current,
+        rd_id:null, moodle_courseid:null,
+      })});
+      col={name:created.collection_name};
+      // Colección recién creada: se sabe con qué embedding, así que se fija
+      // en el asistente (ver asistente_enviar_mensaje — una colección
+      // "normal" no persiste su propio embedding en ningún otro lado).
+      ASIS_WIZ.normalDenseStrategy=denseInfo.current;
+      ASIS_WIZ.normalSparseStrategy=sparseInfo.current;
+    }else{
+      // Colección ya existente: no hay forma de saber con qué embedding se
+      // creó (no se persiste en ningún lado para una colección "normal") —
+      // queda en null; si esa colección no la creó ESTE wizard, el admin
+      // deberá fijar dense/sparse_strategy a mano después, en "Editar".
+      ASIS_WIZ.normalDenseStrategy=null;
+      ASIS_WIZ.normalSparseStrategy=null;
+    }
+    ASIS_WIZ.normalCourseId=null;
+    ASIS_WIZ.normalCourseName=null;
+    ASIS_WIZ.normalCollection=col.name;
+    status.innerHTML=`<span style="color:var(--green-700)">✓ Colección: ${esc(col.name)} (sin curso de Moodle).</span>`;
+  }catch(e){
+    status.innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
+  }finally{
+    btnEl.disabled=false;btnEl.textContent='Usar / crear';
   }
 }
 
@@ -1977,7 +2048,9 @@ function asisWizStep5HTML(){
       <p class="mt8"><b>Tipo:</b> ${ASIS_WIZ.tipo==='normal'?'📦 Normal':'🏫 Con RD'}</p>
       ${ASIS_WIZ.tipo==='rd'
         ?`<p class="mt8"><b>RD:</b> ${esc(rd?rd.nombre:'')}</p>`
-        :`<p class="mt8"><b>Curso:</b> ${esc(ASIS_WIZ.normalCourseName||'')} (id ${ASIS_WIZ.normalCourseId}) → ${esc(ASIS_WIZ.normalCollection||'')}</p>`}
+        :ASIS_WIZ.normalTieneCurso
+          ?`<p class="mt8"><b>Curso:</b> ${esc(ASIS_WIZ.normalCourseName||'')} (id ${ASIS_WIZ.normalCourseId}) → ${esc(ASIS_WIZ.normalCollection||'')}</p>`
+          :`<p class="mt8"><b>Curso:</b> <span class="muted">ninguno (institucional)</span> → ${esc(ASIS_WIZ.normalCollection||'')}</p>`}
       <p class="mt8"><b>Prompt maestro:</b> ${ASIS_WIZ.promptMaestro?esc(ASIS_WIZ.promptMaestro):'<span class="muted">Ninguno</span>'}</p>
       <p class="mt8"><b>Mensaje de bienvenida:</b> ${ASIS_WIZ.mensajeBienvenida?esc(ASIS_WIZ.mensajeBienvenida):'<span class="muted">Por defecto</span>'}</p>
       <p class="mt8"><b>Mensaje de reencuentro:</b> ${ASIS_WIZ.mensajeReencuentro?esc(ASIS_WIZ.mensajeReencuentro):'<span class="muted">Por defecto</span>'}</p>
@@ -2047,6 +2120,8 @@ async function asisWizardSubmit(){
       token:ASIS_WIZ.token||null,
       rd_id:ASIS_WIZ.tipo==='rd'?ASIS_WIZ.rd_id:null,
       moodle_courseid:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalCourseId:null,
+      dense_strategy:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalDenseStrategy:null,
+      sparse_strategy:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalSparseStrategy:null,
       prompt_maestro:ASIS_WIZ.promptMaestro||null,
       mensaje_bienvenida:ASIS_WIZ.mensajeBienvenida||null,
       mensaje_reencuentro:ASIS_WIZ.mensajeReencuentro||null,
@@ -2171,9 +2246,9 @@ function asisEditGeneralHTML(){
 function asisEditTipoBodyHTML(){
   const a=ASIS_EDIT.data;
   if(a.tipo==='normal'){
-    return `<div class="fg"><label class="fl">Course ID (Moodle) <span class="req">*</span></label>
-      <input class="fc" type="number" id="edit-courseid" value="${a.moodle_courseid??''}" style="max-width:200px">
-      <div class="fh">Este asistente resuelve su colección directamente por este courseid.</div></div>`;
+    return `<div class="fg"><label class="fl">Course ID (Moodle) <span class="muted">— opcional</span></label>
+      <input class="fc" type="number" id="edit-courseid" value="${a.moodle_courseid?a.moodle_courseid:''}" style="max-width:200px">
+      <div class="fh">Este asistente resuelve su colección directamente por este courseid. Déjalo vacío para un asistente institucional sin curso (su chat público solo pedirá un código de estudiante, no un Course ID).</div></div>`;
   }
   return `<div class="fg"><label class="fl">RD (aula) <span class="req">*</span></label>
     <select class="fc" id="edit-rd"><option value="">— Selecciona —</option>
@@ -2192,7 +2267,7 @@ function asisEditSelectTipo(tipo){
 function asisEditCursoHTML(){
   const a=ASIS_EDIT.data;
   if(a.tipo==='normal'){
-    return `<p class="muted">Este asistente usa directamente la colección "normal" del curso ${a.moodle_courseid??'—'}
+    return `<p class="muted">Este asistente usa directamente la colección "normal" ${a.moodle_courseid?`del curso ${a.moodle_courseid}`:'institucional (sin curso de Moodle)'}
       (sin pasar por una RD). Las colecciones se gestionan desde "Gestión Qdrant".</p>
       <button class="btn btn-out btn-sm" onclick='closeModal();qLoadCols();showMod("qdrant-cols")'>Abrir Gestión Qdrant → Colecciones →</button>`;
   }
@@ -2251,10 +2326,6 @@ async function asisEditSubmit(){
   const a=ASIS_EDIT.data;
   if(a.tipo==='rd'&&!a.rd_id){
     $('edit-err').innerHTML='<div class="alert a-err mt8">Selecciona una RD.</div>';
-    return;
-  }
-  if(a.tipo==='normal'&&!a.moodle_courseid){
-    $('edit-err').innerHTML='<div class="alert a-err mt8">Ingresa un Course ID.</div>';
     return;
   }
   const btnEl=document.querySelector('#edit-body .modal-foot .btn-prim');

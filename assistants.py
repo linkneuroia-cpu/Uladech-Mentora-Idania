@@ -122,12 +122,19 @@ _STRATEGY_FIELDS = (
     "contextual_strategy",
     "rerank_strategy",
     "generation_strategy",
+    "dense_strategy",
+    "sparse_strategy",
 )
-# dense_strategy/sparse_strategy YA NO se escriben desde aquí: son el
-# embedding maestro de la RD (rds.dense_strategy/sparse_strategy), no del
-# asistente — todas las colecciones de una RD deben compartirlo. Las
-# columnas siguen existiendo en `asistentes` (no se eliminaron, evita una
-# migración destructiva) pero quedan sin uso de aquí en adelante.
+# dense_strategy/sparse_strategy: para un asistente CON RD son el embedding
+# maestro de la RD (rds.dense_strategy/sparse_strategy) — todas sus
+# colecciones deben compartirlo, así que estas columnas quedan sin usar
+# (rd.dense_strategy siempre gana en app.py asistente_enviar_mensaje).
+# Para un asistente "normal" (sin RD) no hay RD de la que heredarlo — y a
+# diferencia de una RD, una colección "normal" no persiste su propio
+# embedding en ningún lado una vez creada. Por eso SÍ se usan estas
+# columnas para ese caso: quedan fijadas al crear el asistente (con el
+# mismo valor con el que se creó/eligió su colección) y son las que
+# app.py usa como fallback para resolver preguntas contra esa colección.
 
 
 def _check_token_disponible(token: str, excluir_asistente_id: Optional[int] = None) -> None:
@@ -149,20 +156,30 @@ def create_asistente(
     contextual_strategy: Optional[str] = None,
     rerank_strategy: Optional[str] = None,
     generation_strategy: Optional[str] = None,
+    dense_strategy: Optional[str] = None,
+    sparse_strategy: Optional[str] = None,
     mensaje_bienvenida: Optional[str] = None,
     mensaje_reencuentro: Optional[str] = None,
     max_actividades_sesion: int = 10,
     token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """`rd_id=None`: asistente "normal", sin RD — `moodle_courseid` es
-    entonces obligatorio: resuelve su única colección directamente por ese
-    courseid (ver rds.resolve_collection_normal), en vez de RD+courseid.
+    """`rd_id=None`: asistente "normal", sin RD — resuelve su única
+    colección por `moodle_courseid` (ver rds.resolve_collection_normal), en
+    vez de RD+courseid. `moodle_courseid` es opcional: si no se pasa (p.ej.
+    un asistente institucional sin curso de Moodle detrás, tipo FAQ),
+    se usa el sentinel 0 ("sin curso") — sigue siendo un INTEGER NOT NULL
+    en `colecciones`/`asistente_sesiones`, así que 0 evita una migración de
+    esquema mientras deja la intención clara.
+    `dense_strategy`/`sparse_strategy`: solo tienen efecto para un
+    asistente "normal" (con RD, la RD siempre gana — ver _STRATEGY_FIELDS
+    arriba). Deberían coincidir con el embedding real de la colección de
+    este asistente (no se valida automáticamente).
     `token`: si se pasa, se usa tal cual (validando que no choque con otro
     asistente); si no, se genera uno aleatorio como antes."""
     if rd_id is not None and not db.fetch_one("SELECT id FROM rds WHERE id = %s", (rd_id,)):
         raise ValueError(f"La RD {rd_id} no existe")
-    if rd_id is None and not moodle_courseid:
-        raise ValueError("Un asistente normal (sin RD) requiere un Course ID de Moodle")
+    if rd_id is None and moodle_courseid is None:
+        moodle_courseid = 0
     if token:
         token = token.strip()
         _check_token_disponible(token)
@@ -172,13 +189,13 @@ def create_asistente(
         "INSERT INTO asistentes "
         "(nombre, rd_id, moodle_courseid, prompt_maestro, token, created_by, "
         "etl_document_strategy, etl_audio_strategy, contextual_strategy, "
-        "rerank_strategy, generation_strategy, mensaje_bienvenida, "
-        "mensaje_reencuentro, max_actividades_sesion) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+        "rerank_strategy, generation_strategy, dense_strategy, sparse_strategy, "
+        "mensaje_bienvenida, mensaje_reencuentro, max_actividades_sesion) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
         (
             nombre, rd_id, moodle_courseid, prompt_maestro, token, created_by,
             etl_document_strategy, etl_audio_strategy, contextual_strategy,
-            rerank_strategy, generation_strategy, mensaje_bienvenida,
+            rerank_strategy, generation_strategy, dense_strategy, sparse_strategy, mensaje_bienvenida,
             mensaje_reencuentro, max_actividades_sesion,
         ),
     )
@@ -197,6 +214,8 @@ def update_asistente(
     contextual_strategy: Any = _UNSET,
     rerank_strategy: Any = _UNSET,
     generation_strategy: Any = _UNSET,
+    dense_strategy: Any = _UNSET,
+    sparse_strategy: Any = _UNSET,
     mensaje_bienvenida: Any = _UNSET,
     mensaje_reencuentro: Any = _UNSET,
     max_actividades_sesion: Optional[int] = None,
@@ -223,10 +242,11 @@ def update_asistente(
     courseid_value = existing["moodle_courseid"] if moodle_courseid is _UNSET else moodle_courseid
     if rd_id_value is not None and not db.fetch_one("SELECT id FROM rds WHERE id = %s", (rd_id_value,)):
         raise ValueError(f"La RD {rd_id_value} no existe")
-    # Mismo invariante que create_asistente: sin RD, el courseid es lo único
-    # que resuelve la colección (rds.resolve_collection_normal).
-    if rd_id_value is None and not courseid_value:
-        raise ValueError("Un asistente normal (sin RD) requiere un Course ID de Moodle")
+    # Mismo invariante que create_asistente: sin RD, el courseid resuelve
+    # la colección (rds.resolve_collection_normal) — pero es opcional
+    # (sentinel 0 = "sin curso", ver create_asistente).
+    if rd_id_value is None and courseid_value is None:
+        courseid_value = 0
 
     if token:
         token = token.strip()
@@ -238,6 +258,8 @@ def update_asistente(
         "contextual_strategy": contextual_strategy,
         "rerank_strategy": rerank_strategy,
         "generation_strategy": generation_strategy,
+        "dense_strategy": dense_strategy,
+        "sparse_strategy": sparse_strategy,
     }
     strategy_values = [
         existing[field] if incoming[field] is _UNSET else incoming[field] for field in _STRATEGY_FIELDS
@@ -252,8 +274,8 @@ def update_asistente(
     row = db.execute_returning(
         "UPDATE asistentes SET nombre=%s, rd_id=%s, moodle_courseid=%s, prompt_maestro=%s, activo=%s, "
         "etl_document_strategy=%s, etl_audio_strategy=%s, contextual_strategy=%s, "
-        "rerank_strategy=%s, generation_strategy=%s, mensaje_bienvenida=%s, "
-        "mensaje_reencuentro=%s, max_actividades_sesion=%s, token=%s, "
+        "rerank_strategy=%s, generation_strategy=%s, dense_strategy=%s, sparse_strategy=%s, "
+        "mensaje_bienvenida=%s, mensaje_reencuentro=%s, max_actividades_sesion=%s, token=%s, "
         "updated_at=now() WHERE id=%s RETURNING *",
         (
             nombre if nombre is not None else existing["nombre"],
