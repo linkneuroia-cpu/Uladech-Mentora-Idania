@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 import mimetypes
 import uuid
+import zlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -818,12 +819,29 @@ def _build_asistente_context(
     return "\n".join(partes)
 
 
+def _userid_from_documento(documento: str) -> int:
+    """Deriva un moodle_userid entero y ESTABLE a partir de un documento de
+    identidad, para un visitante sin cuenta de Moodle (ver asistente_chat_page).
+    Un DNI peruano ya es numérico — se usa tal cual (coincide 1:1 con la
+    persona real). Para un documento no numérico (carné de extranjería,
+    pasaporte), se deriva un hash estable (crc32, no depende de
+    PYTHONHASHSEED como el `hash()` builtin) para que la misma persona
+    siempre caiga en el mismo pseudo-userid entre visitas."""
+    if documento.isdigit():
+        return int(documento)
+    return zlib.crc32(documento.encode("utf-8")) & 0x7FFFFFFF
+
+
 @app.get("/asistente/{token}", response_class=HTMLResponse, tags=["Asistente público"])
 async def asistente_chat_page(
     token: str,
     request: Request,
     courseid: int = Query(0, description="Opcional para asistentes 'normal' sin curso — sentinel 0 si se omite."),
-    userid: int = Query(...),
+    userid: Optional[int] = Query(
+        None, description="Userid real de Moodle. Si se omite, se pide documento+nombre en su lugar.",
+    ),
+    documento: Optional[str] = Query(None, description="Alternativa a userid para un visitante sin cuenta de Moodle."),
+    nombre: Optional[str] = Query(None, description="Nombre para saludar — se pide junto con `documento`."),
 ):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
@@ -831,6 +849,20 @@ async def asistente_chat_page(
             "asistente_chat.html",
             {"request": request, "error": "Este asistente no existe o no está activo."},
             status_code=404,
+        )
+
+    documento = (documento or "").strip()
+    nombre = (nombre or "").strip()
+    if userid is None and not (documento and nombre):
+        # Sin userid de Moodle ni documento+nombre todavía: pide identificación
+        # antes de crear ninguna sesión (ver el bloque `necesita_identificacion`
+        # en asistente_chat.html).
+        return templates.TemplateResponse(
+            "asistente_chat.html",
+            {
+                "request": request, "error": None, "necesita_identificacion": True,
+                "token": token, "asistente_nombre": asistente["nombre"], "courseid": courseid,
+            },
         )
 
     # rd_id=None -> asistente "normal": resuelve directo por su propio
@@ -850,8 +882,15 @@ async def asistente_chat_page(
             status_code=404,
         )
 
-    loop = asyncio.get_event_loop()
-    fullname = await loop.run_in_executor(None, get_moodle_user_fullname, userid)
+    if userid is not None:
+        effective_userid = userid
+        moodle_username = None
+        loop = asyncio.get_event_loop()
+        fullname = await loop.run_in_executor(None, get_moodle_user_fullname, userid)
+    else:
+        effective_userid = _userid_from_documento(documento)
+        moodle_username = documento
+        fullname = nombre
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname)
 
     # ¿Ya existía esta sesión con historial antes de este load? -> se
@@ -860,7 +899,7 @@ async def asistente_chat_page(
         db.fetch_one,
         "SELECT id FROM asistente_sesiones WHERE asistente_id=%s AND moodle_courseid=%s AND moodle_userid=%s "
         "ORDER BY started_at DESC LIMIT 1",
-        (asistente["id"], courseid, userid),
+        (asistente["id"], courseid, effective_userid),
     )
     tenia_historial = False
     if existing_sesion:
@@ -868,7 +907,7 @@ async def asistente_chat_page(
 
     sesion = await db.run(
         assistants.get_or_create_sesion,
-        asistente["id"], courseid, userid, None, fullname, collection_name, saludo,
+        asistente["id"], courseid, effective_userid, moodle_username, fullname, collection_name, saludo,
     )
     historial_rows = await db.run(assistants.get_mensajes, sesion["id"])
     # id/rol/contenido/calificacion: escalares simples, no rompen el
@@ -899,7 +938,7 @@ async def asistente_chat_page(
             "max_actividades_sesion": asistente.get("max_actividades_sesion", 10),
             "preguntas_usadas": await db.run(assistants.count_preguntas, sesion["id"]),
             "courseid": courseid,
-            "userid": userid,
+            "userid": effective_userid,
         },
     )
 
@@ -994,13 +1033,31 @@ async def asistente_nueva_conversacion(token: str, req: AsistenteNuevaConversaci
     if not collection_name:
         raise HTTPException(404, f"No hay ninguna colección asignada al curso {req.courseid} en esta RD.")
 
-    loop = asyncio.get_event_loop()
-    fullname = await loop.run_in_executor(None, get_moodle_user_fullname, req.userid)
+    # Reusa la identidad (moodle_username/fullname) de la última sesión de
+    # este mismo usuario en vez de volver a resolverla — necesario para un
+    # usuario identificado por documento (ver asistente_chat_page): no hay
+    # ninguna cuenta de Moodle real que consultar para ese userid derivado,
+    # y volver a llamar a Moodle ahí devolvería un nombre equivocado (o
+    # ninguno) en vez del nombre que la persona escribió.
+    prev_sesion = await db.run(
+        db.fetch_one,
+        "SELECT moodle_username, moodle_fullname FROM asistente_sesiones "
+        "WHERE asistente_id=%s AND moodle_courseid=%s AND moodle_userid=%s "
+        "ORDER BY started_at DESC LIMIT 1",
+        (asistente["id"], req.courseid, req.userid),
+    )
+    if prev_sesion:
+        moodle_username = prev_sesion["moodle_username"]
+        fullname = prev_sesion["moodle_fullname"]
+    else:
+        loop = asyncio.get_event_loop()
+        moodle_username = None
+        fullname = await loop.run_in_executor(None, get_moodle_user_fullname, req.userid)
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname)
 
     sesion = await db.run(
         assistants.get_or_create_sesion,
-        asistente["id"], req.courseid, req.userid, None, fullname, collection_name, saludo,
+        asistente["id"], req.courseid, req.userid, moodle_username, fullname, collection_name, saludo,
         force_new=True,
     )
     return {"sesion_id": sesion["id"], "saludo": saludo}
