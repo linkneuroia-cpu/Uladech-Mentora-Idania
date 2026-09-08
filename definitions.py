@@ -15,6 +15,7 @@ import asyncio
 import uuid
 import requests
 from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from settings import settings, get_model_info, get_model_dimensions, uses_prefix, get_ocr_languages
@@ -171,13 +172,17 @@ _EXTENSION_TYPE_MAP: Dict[str, str] = {
     ".jpg":  "image", ".jpeg": "image", ".png": "image", ".webp": "image",
     ".mp4":  "video", ".mov": "video", ".webm": "video", ".mkv": "video",
     ".mp3":  "audio", ".wav": "audio", ".m4a": "audio", ".ogg": "audio",
+    # Texto ya extraído de una fuente externa (página web scrapeada) — ver
+    # scraping.py/get_course_resources(). Ningún archivo real subido pasa
+    # por acá: .txt no está en settings.ALLOWED_EXTENSIONS.
+    ".txt":  "web",
 }
 
 
 def classify_file_type(filename: str) -> str:
     """
     Clasifica un archivo por su extensión en:
-    pdf | docx | pptx | xlsx | image | video | audio | other
+    pdf | docx | pptx | xlsx | image | video | audio | web | other
     """
     ext = Path(filename).suffix.lower()
     return _EXTENSION_TYPE_MAP.get(ext, "other")
@@ -752,6 +757,8 @@ async def _extract_text(file_path: str) -> str:
         return await _extract_from_xlsx(file_path)
     elif file_type == "image":
         return await _extract_from_image(file_path)
+    elif file_type == "web":
+        return path.read_text(encoding="utf-8", errors="ignore")
     raise ValueError(f"Formato no soportado: {path.suffix}")
 
 
@@ -933,6 +940,12 @@ async def validate_document(file_path: str) -> Dict[str, Any]:
     elif file_type in ("audio", "video"):
         stats["duration_seconds"] = get_media_duration(file_path)
 
+    elif file_type == "web":
+        # Texto ya extraído (scraping.py) — validación liviana, mismo
+        # criterio de "páginas" que ya usa DOCX (palabras / 500).
+        text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+        stats["total_pages"] = max(1, len(text.split()) // 500)
+
     else:
         raise ValueError(f"Formato no soportado para vectorización: '{path.suffix}'")
 
@@ -951,6 +964,8 @@ async def validate_document(file_path: str) -> Dict[str, Any]:
         warning = "Imagen procesada con OCR — la calidad del texto depende de la nitidez de la imagen."
     elif file_type in ("audio", "video"):
         warning = "Contenido transcrito automáticamente con reconocimiento de voz — puede contener errores."
+    elif file_type == "web":
+        warning = "Página web externa — el sistema puede no distinguir contenido de menús/publicidad residual."
 
     return {**stats, "file_type": file_type, "warning_message": warning}
 
@@ -1391,6 +1406,48 @@ _YOUTUBE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Enlaces "url" de Moodle que apuntan a herramientas funcionales (un
+# formulario, una videollamada) en vez de contenido real — no tiene
+# sentido scrapearlos como página web (no hay artículo que extraer, en el
+# mejor caso texto de interfaz sin valor, en el peor una página de login).
+# No es (ni pretende ser) una lista exhaustiva: el filtro real y general
+# es que HybridVectorizationService.process_and_store exige mínimo 100
+# caracteres de texto extraído — esto solo evita gastar una consulta HTTP
+# en los casos más comunes y obvios.
+_NON_CONTENT_URL_RE = re.compile(
+    r"forms\.gle|docs\.google\.com/forms|zoom\.us|meet\.google\.com",
+    re.IGNORECASE,
+)
+
+
+def _institutional_domain() -> str:
+    """Dominio propio de la institución (derivado de MOODLE_URL, quitando
+    el subdominio de Moodle) — usado para distinguir una página web
+    "externa" real de un enlace interno a otra herramienta de la propia
+    institución. Visto en cursos reales: enlaces "url" de Moodle que
+    apuntan al ERP/biblioteca, al repositorio de tesis, o incluso a este
+    mismo gestor (educaia.uladech.edu.pe/f1, /f2, /f3) — ninguno de esos
+    es "contenido" vectorizable, y varios de esos GET tienen efectos
+    secundarios reales (p.ej. crear una sesión de chat) que no hay que
+    disparar por accidente al scrapear."""
+    host = (urlparse(settings.MOODLE_URL).hostname or "").lower()
+    parts = host.split(".")
+    return ".".join(parts[1:]) if len(parts) > 2 else host
+
+
+def _is_external_web_link(link: str) -> bool:
+    """True si `link` es una página web real fuera del ecosistema de la
+    institución — ver _institutional_domain()."""
+    if not link.startswith(("http://", "https://")):
+        return False
+    if _NON_CONTENT_URL_RE.search(link):
+        return False
+    host = (urlparse(link).hostname or "").lower()
+    institutional = _institutional_domain()
+    if institutional and (host == institutional or host.endswith("." + institutional)):
+        return False
+    return True
+
 
 def get_moodle_user_fullname(userid: int) -> Optional[str]:
     """Nombre completo del usuario de Moodle (para el saludo del asistente
@@ -1461,9 +1518,12 @@ def get_course_resources(curid: int) -> List[Dict[str, Any]]:
 
     También procesa módulos "url" (enlaces externos): si el enlace apunta a
     YouTube se agrega como un archivo de video sintético (source="youtube")
-    que el resto del pipeline descarga y transcribe igual que cualquier otro
-    video. Enlaces no-YouTube dentro de "url" (formularios, Zoom, biblioteca,
-    etc.) se ignoran porque no son contenido descargable/vectorizable.
+    que el resto del pipeline transcribe (subtítulos si el video los tiene,
+    o audio+ASR si no — ver scraping.py y core.py). Cualquier otro enlace
+    http(s) real se agrega como una página web sintética (source="web") que
+    se scrapea (texto principal del artículo, ver scraping.py). Enlaces sin
+    URL real (formularios, Zoom sin link directo, etc.) se ignoran porque
+    no son contenido descargable/vectorizable.
     """
     url = f"{settings.MOODLE_URL}/webservice/rest/server.php"
     params = {
@@ -1491,7 +1551,17 @@ def get_course_resources(curid: int) -> List[Dict[str, Any]]:
                 contentfiles = []
                 for item in module.get("contents", []):
                     link = item.get("fileurl") or ""
-                    if item.get("type") == "url" and _YOUTUBE_RE.search(link):
+                    if item.get("type") != "url":
+                        continue
+                    # contenthash/timemodified: casi nunca vienen para un
+                    # recurso "url" (no es un archivo real subido a Moodle),
+                    # pero se pasan igual cuando existan — es lo único que
+                    # curso_archivos (ledger.py) tiene para detectar que el
+                    # profesor editó el enlace. Limitación real y conocida:
+                    # nunca detecta que el CONTENIDO de la página/video
+                    # externo cambió por su cuenta, solo que el bloque de
+                    # Moodle se tocó.
+                    if _YOUTUBE_RE.search(link):
                         module_name = module.get("name") or "video_youtube"
                         contentfiles.append({
                             "filename": f"{module_name}.mp4",
@@ -1499,6 +1569,26 @@ def get_course_resources(curid: int) -> List[Dict[str, Any]]:
                             "fileurl":  link,
                             "mimetype": "video/youtube",
                             "source":   "youtube",
+                            "contenthash": item.get("contenthash"),
+                            "timemodified": item.get("timemodified"),
+                        })
+                    elif _is_external_web_link(link):
+                        # Página web externa (no YouTube, fuera del propio
+                        # dominio institucional) — se scrapea su texto
+                        # principal en vez de descargarse como archivo.
+                        # Enlaces no-http(s), a herramientas funcionales, o
+                        # a la propia institución (Moodle, este gestor, el
+                        # ERP, la biblioteca) se ignoran: no son contenido
+                        # vectorizable — ver _is_external_web_link().
+                        module_name = module.get("name") or "pagina_web"
+                        contentfiles.append({
+                            "filename": f"{module_name}.txt",
+                            "filesize": None,
+                            "fileurl":  link,
+                            "mimetype": "text/html",
+                            "source":   "web",
+                            "contenthash": item.get("contenthash"),
+                            "timemodified": item.get("timemodified"),
                         })
             else:
                 contentfiles = [
@@ -1567,6 +1657,17 @@ def download_pdf_to_temp(fileurl: str, filename: str) -> Path:
     return dest
 
 
+def write_temp_text(filename: str, text: str) -> Path:
+    """Guarda texto ya extraído (página web escrapeada, o el texto plano de
+    una transcripción de YouTube por subtítulos) como un .txt real en
+    temp_docs/ — así sigue el mismo camino que cualquier archivo descargado
+    (validate_document/_extract_text lo leen igual, cleanup_temp_file lo
+    borra igual al terminar)."""
+    dest = settings.TEMP_DIR / _sanitize_filename(filename)
+    dest.write_text(text, encoding="utf-8")
+    return dest
+
+
 def download_youtube_audio(youtube_url: str, filename: str) -> Path:
     """
     Descarga solo el audio (mejor calidad disponible) de un video de YouTube
@@ -1627,6 +1728,7 @@ class HybridVectorizationService:
         total_pages: int,
         original_filename: str = "",
         section_name: str = "",
+        pretranscribed_segments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         from strategies import registry as strategy_registry
         from qdrant_admin import get_qdrant_admin
@@ -1645,12 +1747,32 @@ class HybridVectorizationService:
         use_contextual = self._config.contextual_strategy not in (None, "none")
 
         if file_type in ("audio", "video"):
-            segments = await etl_audio.transcribe(str(file_path))
+            # `pretranscribed_segments`: transcripción de YouTube obtenida
+            # por subtítulos/CC ya existentes (ver scraping.py/core.py) — se
+            # usa tal cual, sin volver a transcribir con la estrategia
+            # configurada, conservando start_time/end_time por chunk.
+            segments = (
+                pretranscribed_segments if pretranscribed_segments is not None
+                else await etl_audio.transcribe(str(file_path))
+            )
             full_text = " ".join(s["text"] for s in segments)
             if len(full_text.strip()) < 20:
                 raise ValueError("Transcripción sin contenido de texto suficiente")
             document_hash = _generate_hash(full_text)
             chunks = chunk_audio_segments(segments)
+        elif file_type == "web":
+            # Página web externa: el texto ya viene extraído (scraping.py) —
+            # nunca pasa por etl_document_strategy (algunas estrategias
+            # asumen PDF real/render de páginas, incompatible con texto
+            # plano ya escrapeado).
+            raw_text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+            full_text = await _normalize_text(raw_text)
+            if len(full_text) < 100:
+                raise ValueError(
+                    "La página no contiene suficiente texto extraíble (mínimo 100 caracteres)"
+                )
+            document_hash = _generate_hash(full_text)
+            chunks = await chunk_text(full_text)
         else:
             raw_text = await etl_document.extract(str(file_path))
             full_text = await _normalize_text(raw_text)
@@ -1773,6 +1895,7 @@ async def vectorize_file_with_pages(
     original_filename: str = "",
     pipeline_config: Optional["PipelineConfig"] = None,
     section_name: str = "",
+    pretranscribed_segments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Pipeline completo: extract → normalize → hash → chunk → embed → store.
@@ -1799,13 +1922,17 @@ async def vectorize_file_with_pages(
             total_pages=total_pages,
             original_filename=original_filename,
             section_name=section_name,
+            pretranscribed_segments=pretranscribed_segments,
         )
 
     stored_filename = original_filename if original_filename else file_path.name
     file_type = classify_file_type(stored_filename)
 
     if file_type in ("audio", "video"):
-        segments = await transcribe_audio_or_video(str(file_path))
+        segments = (
+            pretranscribed_segments if pretranscribed_segments is not None
+            else await transcribe_audio_or_video(str(file_path))
+        )
         full_text = " ".join(s["text"] for s in segments)
         if len(full_text.strip()) < 20:
             raise ValueError("Transcripción sin contenido de texto suficiente")

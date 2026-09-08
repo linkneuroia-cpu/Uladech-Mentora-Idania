@@ -76,10 +76,13 @@ async def lifespan(app: FastAPI):
         concurrent.futures.ThreadPoolExecutor(max_workers=64)
     )
     validate_settings()
+    scheduler_task = None
     if db.check_connection():
         print("✅ Postgres conectado")
         auth.bootstrap_admin()
         credentials.load_all_into_settings()
+        from migracion import migracion_scheduler_loop
+        scheduler_task = asyncio.create_task(migracion_scheduler_loop())
     else:
         print("⚠️ Postgres no disponible al arrancar — el login y las funciones de Asistentes/RD fallarán hasta que se restablezca la conexión.")
     # Pre-carga el modelo por defecto al arrancar
@@ -87,6 +90,12 @@ async def lifespan(app: FastAPI):
     print("✅ Sistema listo")
     yield
     print("👋 Cerrando sistema...")
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -308,7 +317,9 @@ async def list_collections(
         links = await db.run(
             db.fetch_all,
             "SELECT c.id AS link_id, c.qdrant_collection_name, c.rd_id, c.moodle_courseid, "
-            "c.vector_schema AS vector_schema_db, r.nombre AS rd_nombre "
+            "c.vector_schema AS vector_schema_db, r.nombre AS rd_nombre, "
+            "c.migracion_modo, c.migracion_intervalo_minutos, c.migracion_estado, "
+            "c.migracion_ultima_at, c.migracion_ultimo_resultado "
             "FROM colecciones c LEFT JOIN rds r ON r.id = c.rd_id "
             "WHERE c.qdrant_collection_name IS NOT NULL",
         )
@@ -324,6 +335,11 @@ async def list_collections(
             # leído de Qdrant — se mantienen separados para poder detectar
             # desincronización en vez de esconderla.
             c["vector_schema_db"] = link["vector_schema_db"] if link else None
+            c["migracion_modo"] = link["migracion_modo"] if link else "manual"
+            c["migracion_intervalo_minutos"] = link["migracion_intervalo_minutos"] if link else None
+            c["migracion_estado"] = link["migracion_estado"] if link else None
+            c["migracion_ultima_at"] = link["migracion_ultima_at"] if link else None
+            c["migracion_ultimo_resultado"] = link["migracion_ultimo_resultado"] if link else None
         return {"collections": collections}
     service = get_service()
     return {"collections": service.list_collections()}
@@ -335,6 +351,46 @@ async def list_collections(
 # apuntando a qdrant_admin.QdrantAdminManager en vez de un microservicio
 # aparte, con soporte adicional para el esquema híbrido.
 # ═══════════════════════════════════════════════════════════════════
+
+class CollectionMigracionRequest(BaseModel):
+    migracion_modo: str  # 'manual' | 'periodica'
+    migracion_intervalo_minutos: Optional[int] = None  # requerido si modo='periodica' — 5, 60 o 1440
+
+
+@app.patch("/api/collections/{collection_name}/migracion", tags=["Gestión Qdrant"])
+async def qdrant_set_migracion(collection_name: str, req: CollectionMigracionRequest):
+    """Fija el modo de migración (re-sincronización automática con Moodle)
+    de una colección: 'manual' (nunca se toca sola) o 'periodica' (el
+    scheduler la revisa cada `migracion_intervalo_minutos`, ver
+    migracion.py)."""
+    if not get_qdrant_admin().collection_exists(collection_name):
+        raise HTTPException(404, f"Colección '{collection_name}' no existe")
+    try:
+        return await db.run(
+            rds.set_migracion_config, collection_name, req.migracion_modo, req.migracion_intervalo_minutos
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/collections/{collection_name}/migracion/ejecutar", tags=["Gestión Qdrant"])
+async def qdrant_ejecutar_migracion(collection_name: str, background_tasks: BackgroundTasks):
+    """Dispara la migración de esta colección ahora mismo (funciona en
+    cualquier modo, manual o periódica) — requiere que la colección tenga
+    un courseid real de Moodle detrás."""
+    row = await db.run(
+        db.fetch_one, "SELECT * FROM colecciones WHERE qdrant_collection_name=%s", (collection_name,)
+    )
+    if not row:
+        raise HTTPException(404, f"Colección '{collection_name}' no existe")
+    if not row.get("moodle_courseid"):
+        raise HTTPException(400, "Esta colección no tiene un curso de Moodle real — no se puede migrar")
+    if row.get("migracion_estado") == "corriendo":
+        raise HTTPException(409, "Esta colección ya tiene una migración en curso")
+    import migracion
+
+    background_tasks.add_task(migracion.ejecutar_migracion, row)
+    return {"status": "iniciado", "collection": collection_name}
 
 @app.post("/api/collections", status_code=201, tags=["Gestión Qdrant"])
 async def qdrant_create_collection(req: CollectionCreateRequest):

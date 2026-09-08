@@ -49,6 +49,17 @@ CREATE TABLE colecciones (
     rd_id                   INTEGER REFERENCES rds(id) ON DELETE RESTRICT,
     moodle_courseid         INTEGER NOT NULL,
     vector_schema           VARCHAR(10),
+    -- Migración (re-sincronización con Moodle): manual = nunca se toca
+    -- sola; periodica = el scheduler (migracion.py) la revisa cada
+    -- migracion_intervalo_minutos y vectoriza lo nuevo/modificado (ver
+    -- ledger.py). Solo tiene efecto real si moodle_courseid > 0 (una
+    -- colección "normal" institucional, sin curso real, no tiene qué
+    -- sincronizar).
+    migracion_modo              VARCHAR(10) NOT NULL DEFAULT 'manual' CHECK (migracion_modo IN ('manual', 'periodica')),
+    migracion_intervalo_minutos INTEGER,
+    migracion_estado             VARCHAR(20),
+    migracion_ultima_at          TIMESTAMPTZ,
+    migracion_ultimo_resultado   TEXT,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (rd_id, moodle_courseid)
 );

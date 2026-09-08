@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional
 from settings import settings
 import db
 import ledger
+import scraping
 
 from definitions import (
     get_service,
@@ -32,6 +33,7 @@ from definitions import (
     get_course_resources,
     download_pdf_to_temp,
     download_youtube_audio,
+    write_temp_text,
     cleanup_temp_file,
     classify_file_type,
     DocumentInfo,
@@ -452,11 +454,40 @@ class AutoCore:
                     else _desambiguar_filename(filename, info["resource_id"])
                 )
                 try:
+                    pretranscribed_segments = None
                     if info.get("source") == "youtube":
-                        temp_path = download_youtube_audio(fileurl, effective_filename)
+                        pretranscribed_segments = scraping.get_youtube_transcript(fileurl)
+                        if pretranscribed_segments is not None:
+                            # Vía rápida: el video ya tiene subtítulos/CC —
+                            # se evita descargar audio y correr Whisper.
+                            # `temp_path` es solo un placeholder en disco
+                            # (para que el resto del flujo, que espera un
+                            # Path real, no cambie) — el texto real viaja
+                            # aparte en `pretranscribed_segments` y es lo que
+                            # de verdad se vectoriza (ver confirm_and_vectorize
+                            # / vectorize_file_with_pages), conservando los
+                            # timestamps para citar "minuto mm:ss" igual que
+                            # con Whisper.
+                            full_text = " ".join(s["text"] for s in pretranscribed_segments)
+                            temp_path = write_temp_text(effective_filename, full_text)
+                            val = {
+                                "file_type": "video",
+                                "total_pages": max(1, len(full_text.split()) // 500),
+                                "total_images": 0,
+                                "total_tables": 0,
+                                "duration_seconds": pretranscribed_segments[-1]["end"] if pretranscribed_segments else None,
+                                "warning_message": "Transcripción obtenida de los subtítulos de YouTube (más rápida que la transcripción automática).",
+                            }
+                        else:
+                            temp_path = download_youtube_audio(fileurl, effective_filename)
+                            val = await validate_document(str(temp_path))
+                    elif info.get("source") == "web":
+                        scraped = scraping.scrape_web_page(fileurl)
+                        temp_path = write_temp_text(effective_filename, scraped["text"])
+                        val = await validate_document(str(temp_path))
                     else:
                         temp_path = download_pdf_to_temp(fileurl, effective_filename)
-                    val = await validate_document(str(temp_path))
+                        val = await validate_document(str(temp_path))
                     dup = service.check_duplicate(effective_filename, collection_name)
 
                     warning_message = val["warning_message"] or ""
@@ -486,6 +517,7 @@ class AutoCore:
                         "section_name": "; ".join(info.get("section_names", [])),
                         "total_pages":  val["total_pages"],
                         "source_type":  file_source_types.get(filename, source_type or DEFAULT_SOURCE_TYPE),
+                        "pretranscribed_segments": pretranscribed_segments,
                     })
 
                 except Exception as e:
@@ -575,6 +607,7 @@ class AutoCore:
                     original_filename=filename,
                     pipeline_config=pipeline_config,
                     section_name=section_name,
+                    pretranscribed_segments=fd.get("pretranscribed_segments"),
                 )
                 results.append({"filename": filename, **result})
                 if curid:
@@ -718,12 +751,30 @@ class UpdateCore:
                 f"'{moodle_filename}' no encontrado en curid {curid}"
             )
 
+        pretranscribed_segments = None
         if file_info.get("source") == "youtube":
-            temp_path = download_youtube_audio(file_info["fileurl"], moodle_filename)
+            pretranscribed_segments = scraping.get_youtube_transcript(file_info["fileurl"])
+            if pretranscribed_segments is not None:
+                full_text = " ".join(s["text"] for s in pretranscribed_segments)
+                temp_path = write_temp_text(moodle_filename, full_text)
+                val = {
+                    "file_type": "video",
+                    "total_pages": max(1, len(full_text.split()) // 500),
+                    "total_images": 0,
+                    "total_tables": 0,
+                    "duration_seconds": pretranscribed_segments[-1]["end"] if pretranscribed_segments else None,
+                    "warning_message": "Transcripción obtenida de los subtítulos de YouTube (más rápida que la transcripción automática).",
+                }
+            else:
+                temp_path = download_youtube_audio(file_info["fileurl"], moodle_filename)
+                val = await validate_document(str(temp_path))
+        elif file_info.get("source") == "web":
+            scraped = scraping.scrape_web_page(file_info["fileurl"])
+            temp_path = write_temp_text(moodle_filename, scraped["text"])
+            val = await validate_document(str(temp_path))
         else:
             temp_path = download_pdf_to_temp(file_info["fileurl"], moodle_filename)
-
-        val = await validate_document(str(temp_path))
+            val = await validate_document(str(temp_path))
         dup = service.check_duplicate(filename_to_replace, collection_name)
 
         if moodle_filename != filename_to_replace:
@@ -748,6 +799,7 @@ class UpdateCore:
                 "path":        str(temp_path),
                 "course_name": course_name_found,
                 "total_pages": val["total_pages"],
+                "pretranscribed_segments": pretranscribed_segments,
             },
         })
         job_store[job_id]["status"] = "pendiente_confirmacion"
@@ -804,6 +856,7 @@ class UpdateCore:
                 service=service,
                 original_filename=fd.get("filename", ""),
                 pipeline_config=pipeline_config,
+                pretranscribed_segments=fd.get("pretranscribed_segments"),
             )
             _complete_job(job_id, {**result, "embedding_model": model_name})
 

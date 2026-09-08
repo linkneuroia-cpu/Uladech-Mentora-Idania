@@ -999,7 +999,7 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   </div>
   <div class="card">
     <div class="fb card-ttl"><span>Listado</span><button class="btn btn-ghost btn-sm" onclick="qLoadCols()">Actualizar</button></div>
-    <div class="tw"><table><thead><tr><th>ID</th><th>Nombre</th><th>Descripción</th><th>RD / Course ID</th><th>Esquema</th><th>Puntos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody id="q-cols-tbl"><tr><td colspan="8" class="muted">Cargando…</td></tr></tbody></table></div>
+    <div class="tw"><table><thead><tr><th>ID</th><th>Nombre</th><th>Descripción</th><th>RD / Course ID</th><th>Esquema</th><th>Puntos</th><th>Estado</th><th>Migración</th><th>Acciones</th></tr></thead><tbody id="q-cols-tbl"><tr><td colspan="9" class="muted">Cargando…</td></tr></tbody></table></div>
   </div>
   <div class="card hidden" id="q-docs-card">
     <div class="fb card-ttl"><span id="q-docs-ttl">Documentos</span><button class="btn btn-ghost btn-sm" onclick="hide('q-docs-card')">Cerrar</button></div>
@@ -1174,10 +1174,11 @@ const FILE_TYPES={
   image: {icon:'🖼️',label:'Imagen'},
   video: {icon:'🎬',label:'Video'},
   audio: {icon:'🎵',label:'Audio'},
+  web:   {icon:'🌐',label:'Página web'},
   other: {icon:'📁',label:'No soportado'},
 };
 function fileTypeMeta(t){return FILE_TYPES[t]||FILE_TYPES.other}
-const EXT_TYPE_MAP={pdf:'pdf',docx:'docx',pptx:'pptx',ppt:'ppt',xlsx:'xlsx',jpg:'image',jpeg:'image',png:'image',webp:'image',mp4:'video',mov:'video',webm:'video',mkv:'video',mp3:'audio',wav:'audio',m4a:'audio',ogg:'audio'};
+const EXT_TYPE_MAP={pdf:'pdf',docx:'docx',pptx:'pptx',ppt:'ppt',xlsx:'xlsx',jpg:'image',jpeg:'image',png:'image',webp:'image',mp4:'video',mov:'video',webm:'video',mkv:'video',mp3:'audio',wav:'audio',m4a:'audio',ogg:'audio',txt:'web'};
 function extToType(filename){const ext=(filename.split('.').pop()||'').toLowerCase();return EXT_TYPE_MAP[ext]||'other'}
 function fmtDuration(sec){
   if(!sec&&sec!==0)return '';
@@ -3241,9 +3242,30 @@ async function qLoadDash(){
 
 let Q_COLS_RDS=[];
 
+const MIGRACION_INTERVALOS={5:'Cada 5 minutos',60:'Cada hora',1440:'Cada día'};
+
+function fmtIntervalo(min){return MIGRACION_INTERVALOS[min]||(min?`Cada ${min} min`:'')}
+
+function qMigracionCellHTML(c){
+  const estadoTag = c.migracion_estado==='corriendo' ? '<span class="tag t-new">⏳ Corriendo</span>'
+    : c.migracion_estado==='error' ? '<span class="tag t-err" title="'+esc(c.migracion_ultimo_resultado||'')+'">⚠️ Error</span>'
+    : c.migracion_estado==='ok' ? '<span class="tag t-new" title="'+esc(c.migracion_ultimo_resultado||'')+'">✓ OK</span>' : '';
+  const modoTag = c.migracion_modo==='periodica'
+    ? `<span class="tag t-new">🔁 ${esc(fmtIntervalo(c.migracion_intervalo_minutos))}</span>`
+    : '<span class="tag t-warn">✋ Manual</span>';
+  const ultima = c.migracion_ultima_at ? new Date(c.migracion_ultima_at).toLocaleString() : 'Nunca';
+  const puedeMigrar = !!c.moodle_courseid;
+  return `<div>${modoTag} ${estadoTag}</div>
+    <div class="fh">Última: ${esc(ultima)}</div>
+    <div style="margin-top:4px">
+      <button class="btn btn-ghost btn-sm" onclick='qEditMigracion(${JSON.stringify(c.name)},${JSON.stringify(c.migracion_modo)},${c.migracion_intervalo_minutos??'null'})'>Configurar</button>
+      ${puedeMigrar?`<button class="btn btn-ghost btn-sm" ${c.migracion_estado==='corriendo'?'disabled':''} onclick="qMigrarAhora('${esc(c.name)}')">Migrar ahora</button>`:''}
+    </div>`;
+}
+
 async function qLoadCols(){
   const tbl=$('q-cols-tbl');
-  tbl.innerHTML='<tr><td colspan="8" class="muted">Cargando…</td></tr>';
+  tbl.innerHTML='<tr><td colspan="9" class="muted">Cargando…</td></tr>';
   try{
     const [d,rdResp]=await Promise.all([api('{{ URL_PREFIX }}/api/collections?detail=true'),api('{{ URL_PREFIX }}/api/rds')]);
     Q_COLS_RDS=rdResp.rds||[];
@@ -3259,13 +3281,14 @@ async function qLoadCols(){
           :(!c.vector_schema_db?' <span class="muted" title="Sin registrar en Postgres (colección previa a la migración)">·</span>':'')}</td>
         <td>${c.points_count}</td>
         <td>${esc(c.status)}</td>
+        <td>${qMigracionCellHTML(c)}</td>
         <td>
           <button class="btn btn-ghost btn-sm" onclick='qEditRd(${JSON.stringify(c.name)},${c.rd_id??'null'},${c.moodle_courseid??'null'})'>Editar</button>
           <button class="btn btn-ghost btn-sm" onclick="qViewDocs('${esc(c.name)}')">Documentos</button>
           <button class="btn btn-danger btn-sm" onclick="qDeleteCol('${esc(c.name)}',${c.points_count})">Eliminar</button>
         </td>
-      </tr>`).join('')||'<tr><td colspan="8" class="muted">Sin colecciones</td></tr>';
-  }catch(e){tbl.innerHTML=`<tr><td colspan="8" class="muted">${esc(e.message)}</td></tr>`}
+      </tr>`).join('')||'<tr><td colspan="9" class="muted">Sin colecciones</td></tr>';
+  }catch(e){tbl.innerHTML=`<tr><td colspan="9" class="muted">${esc(e.message)}</td></tr>`}
 }
 
 // esPadre: la colección que se está editando es la padre de su RD si su
@@ -3350,6 +3373,51 @@ async function qEditRdSave(name){
       }
     }
     closeModal();
+    qLoadCols();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+
+function qEditMigracion(name,modo,intervalo){
+  showModal(`Migración — ${esc(name)}`,`
+    <div class="fg"><label class="fl">Modo</label>
+      <select class="fc" id="q-migracion-modo" onchange="qMigracionOnChange()">
+        <option value="manual" ${modo!=='periodica'?'selected':''}>Manual — nunca se toca sola</option>
+        <option value="periodica" ${modo==='periodica'?'selected':''}>Periódica — se revisa sola cada cierto tiempo</option>
+      </select>
+    </div>
+    <div class="fg" id="q-migracion-intervalo-box" ${modo!=='periodica'?'hidden':''}>
+      <label class="fl">Intervalo</label>
+      <select class="fc" id="q-migracion-intervalo">
+        <option value="5" ${intervalo===5?'selected':''}>Cada 5 minutos</option>
+        <option value="60" ${intervalo===60||!intervalo?'selected':''}>Cada hora</option>
+        <option value="1440" ${intervalo===1440?'selected':''}>Cada día</option>
+      </select>
+      <div class="fh">Revisa el curso de Moodle de esta colección y vectoriza sola lo nuevo o modificado.</div>
+    </div>
+    <div class="modal-foot" style="margin-top:14px"><button class="btn btn-prim btn-sm" onclick='qMigracionSave(${JSON.stringify(name)})'>Guardar</button></div>
+  `);
+}
+
+function qMigracionOnChange(){
+  const periodica=$('q-migracion-modo').value==='periodica';
+  $('q-migracion-intervalo-box').hidden=!periodica;
+}
+
+async function qMigracionSave(name){
+  const modo=$('q-migracion-modo').value;
+  const intervalo=modo==='periodica'?parseInt($('q-migracion-intervalo').value):null;
+  try{
+    await api(`{{ URL_PREFIX }}/api/collections/${encodeURIComponent(name)}/migracion`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      migracion_modo:modo, migracion_intervalo_minutos:intervalo,
+    })});
+    closeModal();
+    qLoadCols();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+
+async function qMigrarAhora(name){
+  try{
+    await api(`{{ URL_PREFIX }}/api/collections/${encodeURIComponent(name)}/migracion/ejecutar`,{method:'POST'});
     qLoadCols();
   }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
 }

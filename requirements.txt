@@ -33,6 +33,13 @@ easyocr==1.7.2
 pix2tex==0.1.4
 olefile==0.47
 yt-dlp==2026.8.19
+# Ingesta externa (Automático): transcripción rápida de YouTube por
+# subtítulos/CC ya existentes, y scraping de páginas web externas — ver
+# scraping.py.
+youtube-transcript-api>=1.2.4
+trafilatura==1.12.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
 
 # ── pipeline RAG: contextual retrieval, hibrida, reranking, generacion ──
 google-genai==2.20.0

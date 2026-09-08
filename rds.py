@@ -297,3 +297,70 @@ def resolve_collection_normal(moodle_courseid: int) -> Optional[str]:
         (moodle_courseid,),
     )
     return row["qdrant_collection_name"] if row else None
+
+
+# ── Migración (re-sincronización automática con Moodle) ────────────────
+# Ver migracion.py para el scheduler que consume `list_colecciones_periodicas`.
+
+_MIGRACION_INTERVALOS_VALIDOS = (5, 60, 1440)  # 5 min / 1 hora / 1 día
+
+
+def set_migracion_config(
+    qdrant_collection_name: str, modo: str, intervalo_minutos: Optional[int]
+) -> Dict[str, Any]:
+    """Fija el modo de migración de una colección. `modo='periodica'`
+    requiere `intervalo_minutos` en (5, 60, 1440) — valores fijos, no
+    cualquier entero: un intervalo demasiado corto (p.ej. 1 minuto)
+    saturaría a Moodle con el tick del scheduler cada 60s."""
+    if modo not in ("manual", "periodica"):
+        raise ValueError(f"modo inválido: '{modo}' (debe ser 'manual' o 'periodica')")
+    if modo == "periodica":
+        if intervalo_minutos not in _MIGRACION_INTERVALOS_VALIDOS:
+            raise ValueError(
+                f"intervalo_minutos debe ser uno de {_MIGRACION_INTERVALOS_VALIDOS} para modo 'periodica'"
+            )
+        existing = db.fetch_one(
+            "SELECT moodle_courseid FROM colecciones WHERE qdrant_collection_name=%s",
+            (qdrant_collection_name,),
+        )
+        if existing and not existing["moodle_courseid"]:
+            raise ValueError(
+                "Esta colección no tiene un curso de Moodle real — no se puede poner en modo 'periodica'"
+            )
+    else:
+        intervalo_minutos = None
+
+    row = db.execute_returning(
+        "UPDATE colecciones SET migracion_modo=%s, migracion_intervalo_minutos=%s "
+        "WHERE qdrant_collection_name=%s RETURNING *",
+        (modo, intervalo_minutos, qdrant_collection_name),
+    )
+    if not row:
+        raise ValueError(f"La colección '{qdrant_collection_name}' no existe")
+    return row
+
+
+def set_migracion_status(qdrant_collection_name: str, estado: str, resultado: Optional[str]) -> None:
+    """Actualiza el estado de la última corrida (manual o automática) de
+    migración de una colección. `estado`: 'corriendo' | 'ok' | 'error'."""
+    db.execute(
+        "UPDATE colecciones SET migracion_estado=%s, migracion_ultimo_resultado=%s, "
+        "migracion_ultima_at=CASE WHEN %s = 'corriendo' THEN migracion_ultima_at ELSE now() END "
+        "WHERE qdrant_collection_name=%s",
+        (estado, resultado, estado, qdrant_collection_name),
+    )
+
+
+def list_colecciones_periodicas() -> List[Dict[str, Any]]:
+    """Colecciones en modo 'periodica' que ya vencieron su intervalo desde
+    la última corrida — la cola de trabajo del scheduler (migracion.py).
+    Requiere moodle_courseid > 0: el sentinel 0 (colección "normal" sin
+    curso de Moodle real, p.ej. un asistente institucional) no tiene nada
+    que sincronizar. No excluye por rd_id — una colección "normal" con un
+    courseid real también puede migrarse sola."""
+    return db.fetch_all(
+        "SELECT * FROM colecciones WHERE migracion_modo = 'periodica' AND moodle_courseid > 0 "
+        "AND migracion_estado IS DISTINCT FROM 'corriendo' "
+        "AND (migracion_ultima_at IS NULL "
+        "     OR now() - migracion_ultima_at >= (migracion_intervalo_minutos || ' minutes')::interval)"
+    )
