@@ -109,7 +109,11 @@ def scrape_web_page(url: str) -> Dict[str, Any]:
     todo el lote.
     """
     try:
-        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        # verify=False: mismo criterio que el resto del pipeline (descargas
+        # de Moodle, API de Moodle) — algunos sitios externos citados en un
+        # curso real tienen certificados mal configurados; no vale la pena
+        # perder contenido legítimo por eso.
+        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, verify=False)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         raise ValueError(f"No se pudo acceder a la URL: {e}") from e
