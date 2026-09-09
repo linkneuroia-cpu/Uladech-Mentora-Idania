@@ -40,7 +40,7 @@ from definitions import (get_service,
     AutoPreviewRequest, AutoVectorizeRequest,
     UpdateVectorizeRequest,
     _sanitize_filename,
-    get_moodle_user_fullname, get_moodle_course_name,
+    get_moodle_user_info, get_moodle_course_name,
 )
 from core import (
     SemiAutoCore, AutoCore, UpdateCore,
@@ -945,9 +945,10 @@ async def asistente_chat_page(
 
     if userid is not None:
         effective_userid = userid
-        moodle_username = None
         loop = asyncio.get_event_loop()
-        fullname = await loop.run_in_executor(None, get_moodle_user_fullname, userid)
+        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, userid)
+        moodle_username = moodle_info["username"]
+        fullname = moodle_info["fullname"]
     else:
         effective_userid = _userid_from_documento(documento)
         moodle_username = documento
@@ -1112,8 +1113,9 @@ async def asistente_nueva_conversacion(token: str, req: AsistenteNuevaConversaci
         fullname = prev_sesion["moodle_fullname"]
     else:
         loop = asyncio.get_event_loop()
-        moodle_username = None
-        fullname = await loop.run_in_executor(None, get_moodle_user_fullname, req.userid)
+        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, req.userid)
+        moodle_username = moodle_info["username"]
+        fullname = moodle_info["fullname"]
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname)
 
     sesion = await db.run(

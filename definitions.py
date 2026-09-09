@@ -1455,12 +1455,17 @@ def _is_external_web_link(link: str) -> bool:
     return True
 
 
-def get_moodle_user_fullname(userid: int) -> Optional[str]:
-    """Nombre completo del usuario de Moodle (para el saludo del asistente
-    público). Usa core_user_get_users_by_field — verificado en vivo que el
-    MOODLE_TOKEN actual tiene permiso para esta función. Retorna None si el
-    usuario no existe o la llamada falla (el saludo genérico es el
-    fallback, no debe romper la ruta pública)."""
+def get_moodle_user_info(userid: int) -> Dict[str, Optional[str]]:
+    """Nombre completo y username del usuario de Moodle (para el saludo del
+    asistente público y para dejar `moodle_username` bien poblado en
+    asistente_sesiones — antes solo se pedía `fullname`, aunque
+    core_user_get_users_by_field ya trae `username` en la misma respuesta
+    sin costo adicional). Usa core_user_get_users_by_field — verificado en
+    vivo que el MOODLE_TOKEN actual tiene permiso para esta función.
+    Retorna {"fullname": None, "username": None} si el usuario no existe o
+    la llamada falla (el saludo genérico es el fallback, no debe romper la
+    ruta pública)."""
+    empty = {"fullname": None, "username": None}
     try:
         url = f"{settings.MOODLE_URL}/webservice/rest/server.php"
         params = {
@@ -1475,12 +1480,45 @@ def get_moodle_user_fullname(userid: int) -> Optional[str]:
         data = r.json()
         if isinstance(data, dict) and "exception" in data:
             print(f"⚠️ Moodle no pudo resolver el usuario {userid}: {data.get('message')}")
-            return None
+            return empty
         if data and isinstance(data, list):
-            return data[0].get("fullname")
+            return {"fullname": data[0].get("fullname"), "username": data[0].get("username")}
     except Exception as e:
         print(f"⚠️ Error consultando nombre de usuario Moodle {userid}: {e}")
-    return None
+    return empty
+
+
+def get_moodle_users_info(userids: List[int]) -> Dict[int, Dict[str, Optional[str]]]:
+    """Igual que get_moodle_user_info pero para varios userids en una sola
+    llamada (core_user_get_users_by_field acepta varios `values[]`) — usado
+    para el backfill masivo de moodle_username en asistente_sesiones, para
+    no hacer una consulta HTTP por sesión."""
+    if not userids:
+        return {}
+    try:
+        url = f"{settings.MOODLE_URL}/webservice/rest/server.php"
+        params = {
+            "wstoken": settings.MOODLE_TOKEN,
+            "wsfunction": "core_user_get_users_by_field",
+            "moodlewsrestformat": "json",
+            "field": "id",
+        }
+        for i, uid in enumerate(userids):
+            params[f"values[{i}]"] = uid
+        r = requests.get(url, params=params, verify=False, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and "exception" in data:
+            print(f"⚠️ Moodle no pudo resolver el lote de usuarios: {data.get('message')}")
+            return {}
+        if data and isinstance(data, list):
+            return {
+                u["id"]: {"fullname": u.get("fullname"), "username": u.get("username")}
+                for u in data
+            }
+    except Exception as e:
+        print(f"⚠️ Error consultando lote de usuarios Moodle: {e}")
+    return {}
 
 
 def get_moodle_course_name(courseid: int) -> Optional[str]:
