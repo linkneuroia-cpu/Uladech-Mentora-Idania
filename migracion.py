@@ -55,6 +55,25 @@ async def ejecutar_migracion(coleccion: Dict[str, Any]) -> Dict[str, Any]:
         return {"collection": name, "status": "error", "detail": str(e)}
 
 
+def ejecutar_migracion_en_hilo(coleccion: Dict[str, Any]) -> None:
+    """Wrapper SÍNCRONO de ejecutar_migracion(), pensado para correr en un
+    hilo aparte (loop.run_in_executor, o Starlette BackgroundTasks — que ya
+    ejecuta las tareas sync que recibe en un threadpool automáticamente).
+
+    Por qué hace falta: AutoCore.download_and_validate/confirm_and_vectorize
+    hacen llamadas de red y de Qdrant directas (no wrapeadas en executor) —
+    si se las llama tal cual desde una coroutine en el loop principal (como
+    hacía antes esta migración, y como sigue haciendo hoy el Automático
+    manual vía la UI), bloquean el event loop entero mientras corren: todo
+    el resto de la app (login, chat de los asistentes, cualquier otra
+    request) se congela hasta que termina. `asyncio.run()` acá adentro le
+    da a ejecutar_migracion() un event loop propio, en un hilo del sistema
+    operativo separado del principal — así una migración pesada (descargas,
+    transcripción, Qdrant) corre en verdadero segundo plano, sin afectar a
+    los usuarios reales del asistente mientras tanto."""
+    asyncio.run(ejecutar_migracion(coleccion))
+
+
 async def _resolve_model_name(collection_name: str) -> str:
     """El embedding real de la colección: el "maestro" de su RD si tiene
     una (todas las colecciones de una RD lo comparten), o el default del
@@ -74,11 +93,17 @@ async def migracion_scheduler_loop() -> None:
     ejecutar_migracion(); esta función solo protege el ciclo en sí (p.ej.
     un error consultando la lista de pendientes) para que un problema
     puntual no mate la tarea de fondo para siempre."""
+    loop = asyncio.get_event_loop()
     while True:
         try:
             pendientes = await db.run(rds.list_colecciones_periodicas)
             for coleccion in pendientes:
-                await ejecutar_migracion(coleccion)
+                # run_in_executor (no `await ejecutar_migracion` directo):
+                # deja el trabajo pesado en un hilo aparte, ver el docstring
+                # de ejecutar_migracion_en_hilo — sin esto, el tick del
+                # scheduler bloquearía el event loop principal y con él a
+                # toda la app mientras dura la migración.
+                await loop.run_in_executor(None, ejecutar_migracion_en_hilo, coleccion)
         except Exception as e:
             print(f"⚠️ Error en el ciclo del scheduler de migración: {e}")
         await asyncio.sleep(60)

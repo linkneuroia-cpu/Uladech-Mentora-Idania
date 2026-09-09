@@ -100,9 +100,9 @@ def _build(stage: str, name: str) -> Any:
         return mapping[name]()
 
     if stage == "rerank":
-        from strategies.rerank import BGERerankStrategy, CohereRerankStrategy
+        from strategies.rerank import BGERerankStrategy, CohereRerankStrategy, NoOpRerankStrategy
 
-        mapping = {"bge_local": BGERerankStrategy, "cohere": CohereRerankStrategy}
+        mapping = {"none": NoOpRerankStrategy, "bge_local": BGERerankStrategy, "cohere": CohereRerankStrategy}
         return mapping[name]()
 
     if stage == "generation":

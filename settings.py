@@ -196,9 +196,18 @@ AVAILABLE_SPARSE_EMBEDDING_STRATEGIES: Dict[str, Dict] = {
 }
 
 AVAILABLE_RERANK_STRATEGIES: Dict[str, Dict] = {
+    "none": {
+        "provider": None,
+        "description": (
+            "Sin reranking: conserva el orden de Qdrant (fusión RRF dense+sparse). "
+            "Gratis e instantáneo — recomendado sin GPU (el cross-encoder local cuesta "
+            "~28s por consulta en CPU, medido en vivo)."
+        ),
+        "requires_key": None,
+    },
     "bge_local": {
         "provider": "local",
-        "description": "BGE-Reranker (cross-encoder local, BAAI/bge-reranker-v2-m3) — gratis, sin API.",
+        "description": "BGE-Reranker (cross-encoder local, BAAI/bge-reranker-v2-m3) — gratis, sin API, pero pesado en CPU (~28s/consulta sin GPU).",
         "requires_key": None,
     },
     "cohere": {
@@ -348,7 +357,7 @@ class Settings(BaseSettings):
     ETL_AUDIO_STRATEGY: str = "faster_whisper_local"
     CONTEXTUAL_STRATEGY: str = "none"
     SPARSE_EMBEDDING_STRATEGY: str = "bm25"
-    RERANK_STRATEGY: str = "bge_local"
+    RERANK_STRATEGY: str = "none"
     RERANK_TOP_K: int = 50
     RERANK_TOP_N: int = 5
     RERANK_BOOST_MULTIPLIER: float = 1.15

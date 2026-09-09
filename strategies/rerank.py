@@ -58,6 +58,25 @@ class BGERerankStrategy(RerankStrategy):
         return await loop.run_in_executor(None, _call)
 
 
+class NoOpRerankStrategy(RerankStrategy):
+    """Sin reranking real: conserva el orden que ya trajo Qdrant (fusión
+    RRF de dense+sparse) y solo recorta a `top_n`. Gratis e instantáneo —
+    pensado para producción sin GPU, donde el cross-encoder local
+    (BGERerankStrategy) cuesta ~28s por consulta en CPU (ver el comentario
+    de _get_cross_encoder más abajo) y era, medido en vivo, la causa
+    dominante del tiempo de respuesta. `rerank_score` se llena con el
+    score de Qdrant tal cual, para que el resto del pipeline (filtro
+    MIN_SOURCE_RELEVANCE, boost de fuente, score mostrado al usuario) siga
+    funcionando sin distinguir si hubo reranking real o no."""
+
+    async def rerank(
+        self, query: str, candidates: List[Dict[str, Any]], top_n: int
+    ) -> List[Dict[str, Any]]:
+        for c in candidates:
+            c["rerank_score"] = c.get("score")
+        return candidates[:top_n]
+
+
 class CohereRerankStrategy(RerankStrategy):
     """Cohere Rerank v3 — reranking en la nube de alta calidad."""
 

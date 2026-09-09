@@ -389,7 +389,12 @@ async def qdrant_ejecutar_migracion(collection_name: str, background_tasks: Back
         raise HTTPException(409, "Esta colección ya tiene una migración en curso")
     import migracion
 
-    background_tasks.add_task(migracion.ejecutar_migracion, row)
+    # ejecutar_migracion_en_hilo (sync, no la coroutine ejecutar_migracion
+    # directa): BackgroundTasks corre las tareas sync en un threadpool
+    # aparte automáticamente — así esta migración manual tampoco bloquea
+    # el event loop principal mientras corre, igual que la automática del
+    # scheduler (ver migracion.py).
+    background_tasks.add_task(migracion.ejecutar_migracion_en_hilo, row)
     return {"status": "iniciado", "collection": collection_name}
 
 @app.post("/api/collections", status_code=201, tags=["Gestión Qdrant"])
