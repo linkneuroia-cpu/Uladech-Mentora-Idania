@@ -1446,6 +1446,12 @@ def _is_external_web_link(link: str) -> bool:
     institutional = _institutional_domain()
     if institutional and (host == institutional or host.endswith("." + institutional)):
         return False
+    # Herramientas propias corriendo en local/red interna (visto en un
+    # curso real: un link a "localhost:7002" apuntando a una herramienta
+    # de evaluación) — nunca son contenido externo real, sin importar el
+    # dominio configurado en MOODLE_URL.
+    if host == "localhost" or host.startswith(("127.", "10.", "192.168.")):
+        return False
     return True
 
 
