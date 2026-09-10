@@ -14,7 +14,7 @@ from qdrant_admin import get_qdrant_admin
 from settings import settings
 from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
-from strategies.rerank import apply_source_boost
+from strategies.rerank import apply_source_boost, apply_week_boost
 
 # `rerank_score` es la probabilidad de relevancia del cross-encoder (0-1,
 # sigmoid ya aplicado por BGE/Cohere) ANTES del boost de curso_propio.
@@ -100,7 +100,9 @@ async def retrieve_rerank_boost(
     timings: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """hybrid_retrieve() -> reranker.rerank() sobre todo el pool recuperado
-    -> apply_source_boost() (prioriza curso_propio) -> top_n final."""
+    -> apply_source_boost() (prioriza curso_propio) -> apply_week_boost()
+    (prioriza coincidencia exacta de semana/sesión si la pregunta menciona
+    una) -> top_n final."""
     candidates = await hybrid_retrieve(
         collection_name=collection_name,
         query=query,
@@ -118,7 +120,12 @@ async def retrieve_rerank_boost(
     reranked = await reranker.rerank(query, candidates, top_n=len(candidates))
     if timings is not None:
         timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
-    return apply_source_boost(reranked, settings.RERANK_BOOST_MULTIPLIER, top_n=n)
+    # apply_source_boost sin truncar todavía (top_n=len(reranked)): el
+    # boost de semana/sesión necesita ver el pool completo, no solo lo que
+    # ya haya sobrevivido al corte de curso_propio/bibliografía.
+    boosted = apply_source_boost(reranked, settings.RERANK_BOOST_MULTIPLIER, top_n=len(reranked))
+    final = apply_week_boost(boosted, query)
+    return final[:n]
 
 
 def build_generation_prompt(query: str, candidates: List[Dict[str, Any]]) -> str:

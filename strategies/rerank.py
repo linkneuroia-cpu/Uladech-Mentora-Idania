@@ -4,7 +4,8 @@ prioridad a `source_type == "curso_propio"` después del reranking, para
 que el material propio del curso siempre gane frente a bibliografía
 igualmente relevante según el cross-encoder/API.
 """
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional
 
 from strategies.base import RerankStrategy
 
@@ -140,3 +141,60 @@ def apply_source_boost(
 
     ranked = sorted(candidates, key=lambda c: c["boosted_score"], reverse=True)
     return ranked[:top_n]
+
+
+# Semana 02 : ... / Semana  03 : ... (doble espacio, visto en datos reales) /
+# Senana 04 : ... (typo real visto en un curso de Moodle) / SESION
+# APRENDIZAJE 2.docx — se busca el NÚMERO cerca de "semana"/"sesión"/
+# "aprendizaje", tolerando el typo "Senana" (no se ancla a la ortografía
+# de la palabra, solo a que haya un número de 1-2 dígitos ahí cerca).
+_WEEK_NUM_RE = re.compile(
+    r"(?:sem[aá]na|sen[aá]na|sesi[oó]n|aprendizaje|week)\s*[°ºn]?\.?\s*0*(\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_week_number(text: str) -> Optional[int]:
+    m = _WEEK_NUM_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def apply_week_boost(candidates: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Si la pregunta menciona un número de semana/sesión puntual ("¿de qué
+    trata la tarea de la semana 2?"), sube al frente los candidatos cuyo
+    section_name o filename mencionen ese mismo número.
+
+    Por qué hace falta: sin reranker real (ver NoOpRerankStrategy — se
+    desactivó por el costo en CPU sin GPU, ~28s/consulta), la única señal
+    de orden es el score crudo de Qdrant (fusión RRF dense+sparse). Para
+    preguntas "navegacionales" tipo "¿de qué trata la semana N?" eso no
+    alcanza: las sesiones de un curso comparten casi el mismo boilerplate
+    estructural (DATOS GENERALES, DESARROLLO APLICACIÓN, Indicaciones para
+    el desarrollo, Criterios de evaluación...) semana a semana, así que el
+    embedding de la pregunta puntúa parecido a CUALQUIER semana — se vio
+    en vivo un caso real donde la semana correcta quedaba en el puesto
+    #11, fuera del top_n que llega al LLM, y la respuesta terminaba
+    describiendo el tema de otra semana. El número de semana/sesión, en
+    cambio, es una señal exacta que el texto plano ya trae — no hace
+    falta ningún modelo para aprovecharla.
+
+    No afecta ninguna pregunta que no mencione una semana/sesión (retorna
+    la lista igual, sin tocar el orden)."""
+    query_week = _extract_week_number(query)
+    if query_week is None:
+        return candidates
+
+    max_score = max((c.get("boosted_score", 0.0) for c in candidates), default=0.0)
+    for c in candidates:
+        payload = c.get("payload", {})
+        matches = (
+            _extract_week_number(payload.get("section_name") or "") == query_week
+            or _extract_week_number(payload.get("filename") or "") == query_week
+        )
+        if matches:
+            # Por encima del máximo existente — garantiza que quede
+            # primero sin importar cuán bajo haya puntuado el fusion
+            # RRF/dense+sparse original.
+            c["boosted_score"] = max_score + 1.0 + c.get("boosted_score", 0.0)
+
+    return sorted(candidates, key=lambda c: c["boosted_score"], reverse=True)
