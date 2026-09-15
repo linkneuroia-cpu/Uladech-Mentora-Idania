@@ -178,7 +178,21 @@ def retag_repeated_templates(collection_name: str) -> Dict[str, Any]:
         sig = d.table_signature(pt.payload.get("text") or "")
         point_sig[pt.id] = sig
         if sig is not None:
-            sig_docs.setdefault(sig, set()).add(pt.payload.get("filename"))
+            # Identidad de documento SIN extensión: en Moodle es común que
+            # el mismo archivo fuente (ej. el sílabo) esté subido dos veces,
+            # una en .docx y otra en .pdf — mismo contenido real, dos
+            # nombres de archivo distintos. Sin normalizar esto, ese ÚNICO
+            # documento autoritativo (ej. el sílabo real con el docente
+            # verdadero) se contaba como "2 documentos que comparten la
+            # misma estructura de tabla" y se marcaba incorrectamente como
+            # plantilla repetida de baja autoridad — encontrado con datos
+            # reales en producción (Curso_1541: SILABO...docx +
+            # SILABO...pdf, mismo docente, degradaba la respuesta a
+            # insuficiente). Genérico: no depende del nombre de ningún
+            # documento puntual, solo colapsa duplicados de formato del
+            # MISMO nombre base.
+            doc_identity = re.sub(r"\.[a-z0-9]{2,5}$", "", (pt.payload.get("filename") or "").strip().lower())
+            sig_docs.setdefault(sig, set()).add(doc_identity)
     repeated = {sig for sig, docs in sig_docs.items() if len(docs) >= 2}
 
     updates_true, updates_false = [], []
