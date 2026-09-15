@@ -419,9 +419,19 @@ function renderMath(el){
 function setIntro(saludoText, reencuentroText){
   const s=document.getElementById('chat-intro-saludo');
   const r=document.getElementById('chat-intro-reencuentro');
-  if(saludoText!=null){s.innerHTML=mdToHtml(saludoText);}
-  if(reencuentroText){r.innerHTML=mdToHtml(reencuentroText);r.hidden=false;}
-  else{r.hidden=true;r.innerHTML='';}
+  // Mostrar SIEMPRE uno solo, nunca los dos apilados: si hay reencuentro
+  // (el alumno ya tenía historial en esta sesión), reemplaza al saludo en
+  // vez de sumarse debajo — antes se veían los dos bloques seguidos
+  // (saludo completo + reencuentro con línea punteada arriba) cada vez
+  // que alguien reabría el chat después de haber preguntado algo.
+  if(reencuentroText){
+    s.innerHTML='';
+    r.innerHTML=mdToHtml(reencuentroText);
+    r.hidden=false;
+  }else{
+    if(saludoText!=null){s.innerHTML=mdToHtml(saludoText);}
+    r.hidden=true;r.innerHTML='';
+  }
 }
 
 function addMsg(role, text){
