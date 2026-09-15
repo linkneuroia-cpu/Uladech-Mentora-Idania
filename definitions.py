@@ -826,11 +826,24 @@ async def transcribe_audio_or_video(file_path: str) -> List[Dict[str, Any]]:
     model = await loop.run_in_executor(None, _get_whisper_model)
 
     def _run():
-        segments_iter, _info = model.transcribe(file_path, vad_filter=True)
-        return [
-            {"start": s.start, "end": s.end, "text": s.text.strip()}
-            for s in segments_iter if s.text.strip()
-        ]
+        # vad_filter=True descarta silencio antes de transcribir — cuando
+        # TODO el archivo es silencio (ej. una grabación de pantalla sin
+        # narración hablada), es un comportamiento conocido de faster-whisper
+        # que su fusión interna de timestamps de voz calcule max() sobre una
+        # lista vacía y reviente ANTES de devolver algo. Sin este try/except
+        # ese crash llegaba crudo hasta el usuario ("max() arg is an empty
+        # sequence") en vez del mensaje ya existente y claro
+        # ("Transcripción sin contenido de texto suficiente") que el caller
+        # ya produce correctamente para una lista de segmentos vacía.
+        try:
+            segments_iter, _info = model.transcribe(file_path, vad_filter=True)
+            return [
+                {"start": s.start, "end": s.end, "text": s.text.strip()}
+                for s in segments_iter if s.text.strip()
+            ]
+        except Exception as e:
+            print(f"⚠️ Transcripción falló (posible video/audio sin voz detectable): {e}")
+            return []
 
     return await loop.run_in_executor(None, _run)
 
