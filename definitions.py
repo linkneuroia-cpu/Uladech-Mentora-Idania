@@ -2013,6 +2013,23 @@ def get_course_resources(curid: int) -> List[Dict[str, Any]]:
     return resources
 
 
+def _unique_temp_name(filename: str) -> str:
+    """Nombre de archivo temporal, único por descarga (prefijo aleatorio de
+    8 hex). settings.TEMP_DIR se comparte entre CUALQUIER descarga
+    concurrente del proceso — dos migraciones corriendo al mismo tiempo
+    (periódica + manual, o dos colecciones distintas cuyo curso real
+    comparte nombres de archivo, ej. una RD y su colección "hija" clonada)
+    antes escribían las dos al MISMO path (derivado solo del filename
+    sanitizado) y la limpieza de una borraba el archivo que la otra
+    todavía estaba usando — encontrado con datos reales en producción
+    (colisión real entre Curso_1472 y Curso_173, mismos nombres de
+    archivo, ambos con actividad de vectorización al mismo tiempo).
+    Ningún caller depende de que el nombre del archivo temporal sea
+    exactamente el filename original — ese nombre real siempre se pasa
+    aparte (`original_filename`/`filename`) a quien vectoriza."""
+    return f"{uuid.uuid4().hex[:8]}_{_sanitize_filename(filename)}"
+
+
 def download_pdf_to_temp(fileurl: str, filename: str) -> Path:
     """
     Descarga un archivo (de cualquier tipo soportado) directamente desde el
@@ -2025,8 +2042,7 @@ def download_pdf_to_temp(fileurl: str, filename: str) -> Path:
         sep = "&" if "?" in download_url else "?"
         download_url = f"{download_url}{sep}token={settings.MOODLE_TOKEN}"
 
-    safe_name = _sanitize_filename(filename)
-    dest = settings.TEMP_DIR / safe_name
+    dest = settings.TEMP_DIR / _unique_temp_name(filename)
     file_type = classify_file_type(filename)
 
     with requests.get(download_url, stream=True, allow_redirects=True, verify=False) as r:
@@ -2052,7 +2068,7 @@ def write_temp_text(filename: str, text: str) -> Path:
     temp_docs/ — así sigue el mismo camino que cualquier archivo descargado
     (validate_document/_extract_text lo leen igual, cleanup_temp_file lo
     borra igual al terminar)."""
-    dest = settings.TEMP_DIR / _sanitize_filename(filename)
+    dest = settings.TEMP_DIR / _unique_temp_name(filename)
     dest.write_text(text, encoding="utf-8")
     return dest
 
@@ -2064,7 +2080,7 @@ def download_youtube_audio(youtube_url: str, filename: str) -> Path:
     mezcla audio+video (el contenedor descargado se transcribe tal cual con
     faster-whisper, que decodifica cualquier formato vía PyAV).
     """
-    safe_stem = Path(_sanitize_filename(filename)).stem
+    safe_stem = Path(_unique_temp_name(filename)).stem
     outtmpl = str(settings.TEMP_DIR / f"{safe_stem}.%(ext)s")
 
     ydl_opts = {
