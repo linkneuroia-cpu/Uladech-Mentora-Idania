@@ -69,6 +69,9 @@ class DocumentInfo(BaseModel):
     file_type: str = "other"
     is_duplicate: bool = False
     existing_chunks: int = 0
+    existing_date: Optional[str] = None
+    existing_source_type: Optional[str] = None
+    moodle_upload_date: Optional[str] = None
 
 
 class ValidationSummary(BaseModel):
@@ -235,6 +238,69 @@ def _table_to_markdown(rows: List[List[Optional[str]]]) -> str:
         row = (row + [""] * width)[:width]
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
+
+
+def _parse_markdown_table_rows(md_text: str) -> List[Dict[str, str]]:
+    """Parsea una tabla Markdown GFM (la misma sintaxis que produce
+    _table_to_markdown) de vuelta a filas {encabezado: valor} — genérico
+    para cualquier tabla real, sin asumir nada sobre el significado de las
+    columnas.
+
+    Dos particularidades reales de pdfplumber que hay que tolerar (vistas
+    en datos reales, no hipotéticas):
+    1. Celdas de relleno vacías intercaladas por fusión de celdas del PDF
+       original (ej. una fila real de 4 valores puede llegar como 12
+       celdas, con 8 vacías en posiciones que varían de fila a fila) — por
+       eso NUNCA se empareja por posición cruda; cada fila se comprime a
+       sus celdas no vacías, en orden, antes de emparejar.
+    2. Una tabla de 2 columnas suele ser una lista campo/valor SIN fila de
+       encabezado real (la "primera fila" ya es un dato como cualquier
+       otra, ej. "0. Programa de estudio | Odontología") — tratarla como
+       encabezado descartaría ese primer dato y arruinaría el resto. Por
+       eso el criterio de si hay encabezado es el número de columnas
+       reales tras comprimir, no la posición de la fila."""
+    lines = [ln.strip() for ln in md_text.strip().split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return []
+
+    def _split_row(line: str) -> List[str]:
+        return [c.strip() for c in line.strip("|").split("|") if c.strip()]
+
+    if not re.match(r"^\|?[\s:-]+\|?[\s:|-]*$", lines[1]):
+        return []  # la segunda línea no es el separador GFM esperado — no es una tabla real
+
+    header_cells = _split_row(lines[0])
+    body_lines = lines[2:]
+
+    if len(header_cells) == 1:
+        # Tabla de una sola columna real — cada línea (incluida la
+        # "header") ya es un dato autocontenido, sin key:value que armar.
+        rows = [{"": header_cells[0]}] if header_cells[0] else []
+        for line in body_lines:
+            cells = _split_row(line)
+            if cells:
+                rows.append({"": " ".join(cells)})
+        return rows
+
+    if len(header_cells) == 2:
+        # Lista campo/valor sin encabezado real — la fila 0 es un dato más.
+        rows = []
+        for line in [lines[0]] + body_lines:
+            cells = _split_row(line)
+            if len(cells) == 2:
+                rows.append({cells[0]: cells[1]})
+        return rows
+
+    # 3+ columnas reales: la fila 0 sí son encabezados genuinos.
+    rows = []
+    for line in body_lines:
+        cells = _split_row(line)
+        if len(cells) != len(header_cells):
+            continue  # fila con cantidad de columnas reales distinta — se omite, no se adivina
+        row = {h: c for h, c in zip(header_cells, cells)}
+        if row:
+            rows.append(row)
+    return rows
 
 
 def _group_words_into_blocks(words: List[Dict[str, Any]]) -> List[Tuple[float, str]]:
@@ -423,13 +489,14 @@ async def _ocr_page_region(fitz_page, bbox: Tuple[float, float, float, float]) -
         tmp_path.unlink(missing_ok=True)
 
 
-async def _extract_from_pdf(file_path: str) -> str:
-    """Extrae texto de PDF: párrafos + tablas (convertidas a Markdown, ya
-    no descartadas) + fórmulas/gráficos vectoriales (recorte + OCR local),
-    intercalados en el orden vertical real de cada página. Excluye
-    encabezados y pies de página."""
+async def _extract_from_pdf_blocks(file_path: str) -> List[Dict[str, Any]]:
+    """Como _extract_from_pdf, pero conserva cada bloque por separado con
+    su tipo ("table"/"text") y número de página, en vez de aplanarlo a un
+    string — lo necesita chunk_structured_blocks() para no partir ni
+    mezclar una tabla con el texto vecino (ver docstring de esa función).
+    Excluye encabezados y pies de página."""
     doc = fitz.open(file_path)
-    full_text = []
+    all_blocks: List[Dict[str, Any]] = []
 
     try:
         with pdfplumber.open(file_path) as pdf:
@@ -446,14 +513,14 @@ async def _extract_from_pdf(file_path: str) -> str:
                 })
                 table_bboxes = [t.bbox for t in tables]
 
-                # bloques con su posición vertical, para reconstruir el
-                # orden real de lectura de la página al final.
-                blocks: List[Tuple[float, str]] = []
+                # bloques con su posición vertical y tipo, para reconstruir
+                # el orden real de lectura de la página al final.
+                blocks: List[Tuple[float, str, str]] = []
 
                 for t in tables:
                     md = _table_to_markdown(t.extract())
                     if md:
-                        blocks.append((t.bbox[1], md))
+                        blocks.append((t.bbox[1], md, "table"))
 
                 words = page.extract_words(x_tolerance=1, y_tolerance=1)
                 text_words = []
@@ -468,7 +535,8 @@ async def _extract_from_pdf(file_path: str) -> str:
                     )
                     if not in_table:
                         text_words.append(word)
-                blocks.extend(_group_words_into_blocks(text_words))
+                for top, text in _group_words_into_blocks(text_words):
+                    blocks.append((top, text, "text"))
 
                 formula_regions = _find_formula_regions(
                     fitz_page, table_bboxes, header_bottom, footer_top
@@ -480,19 +548,33 @@ async def _extract_from_pdf(file_path: str) -> str:
                     # caso de que ninguno de los dos reconociera nada.
                     content = await _ocr_page_region(fitz_page, region)
                     marker = content or "[hay contenido gráfico en esta sección que el sistema no pudo transcribir]"
-                    blocks.append((region[1], marker))
+                    blocks.append((region[1], marker, "text"))
 
                 blocks.sort(key=lambda b: b[0])
-                page_text = "\n".join(b[1] for b in blocks)
-                if page_text.strip():
-                    full_text.append(page_text)
+                for _, text, btype in blocks:
+                    if text.strip():
+                        all_blocks.append({"type": btype, "text": text, "page": page_num})
 
     except Exception as e:
         raise ValueError(f"Error extrayendo PDF: {e}")
     finally:
         doc.close()
 
-    return "\n".join(full_text)
+    return all_blocks
+
+
+async def _extract_from_pdf(file_path: str) -> str:
+    """Extrae texto de PDF: párrafos + tablas (convertidas a Markdown, ya
+    no descartadas) + fórmulas/gráficos vectoriales (recorte + OCR local),
+    intercalados en el orden vertical real de cada página. Excluye
+    encabezados y pies de página.
+
+    Compatibilidad: aplana _extract_from_pdf_blocks() a un string plano
+    (mismo comportamiento que antes de existir el chunking estructural),
+    para los caminos que todavía no lo usan (VectorizationService legacy,
+    validate_document, etc.)."""
+    blocks = await _extract_from_pdf_blocks(file_path)
+    return "\n".join(b["text"] for b in blocks)
 
 
 def _iter_docx_block_items(doc):
@@ -512,22 +594,33 @@ def _iter_docx_block_items(doc):
             yield Table(child, doc)
 
 
-async def _extract_from_docx(file_path: str) -> str:
+async def _extract_from_docx_blocks(file_path: str) -> List[Dict[str, Any]]:
+    """Como _extract_from_docx, pero conserva cada bloque por separado con
+    su tipo ("table"/"text") — ver _extract_from_pdf_blocks(). DOCX no
+    tiene concepto nativo de "página" (Word solo pagina al renderizar), así
+    que `page` queda siempre None para este formato."""
     from docx.table import Table as DocxTable
 
     doc = DocxDocument(file_path)
-    parts = []
+    blocks: List[Dict[str, Any]] = []
     for item in _iter_docx_block_items(doc):
         if isinstance(item, DocxTable):
             rows = [[cell.text for cell in row.cells] for row in item.rows]
             md = _table_to_markdown(rows)
             if md:
-                parts.append(md)
+                blocks.append({"type": "table", "text": md, "page": None})
         else:
             text = item.text.strip()
             if text:
-                parts.append(text)
-    return "\n\n".join(parts)
+                blocks.append({"type": "text", "text": text, "page": None})
+    return blocks
+
+
+async def _extract_from_docx(file_path: str) -> str:
+    """Compatibilidad: aplana _extract_from_docx_blocks() a un string
+    (ver _extract_from_pdf)."""
+    blocks = await _extract_from_docx_blocks(file_path)
+    return "\n\n".join(b["text"] for b in blocks)
 
 
 async def _extract_from_pptx(file_path: str) -> str:
@@ -766,9 +859,14 @@ async def _normalize_text(text: str) -> str:
     # Whitelist ampliada con operadores/símbolos matemáticos comunes
     # (=+^{}[]<>√±≈∞×÷·, superíndices/subíndices Unicode) — antes se
     # borraban aunque la fórmula sí hubiera sobrevivido a la extracción
-    # como texto real, desfigurándola igual.
+    # como texto real, desfigurándola igual. El pipe "|" también está en
+    # la whitelist — es la sintaxis de columnas de las tablas Markdown
+    # (_table_to_markdown/chunk_structured_blocks); sin él, la tabla
+    # llegaba al chunker ya sin separadores de columna, rompiendo tanto el
+    # chunk de tabla completa como el parseo de filas individuales
+    # (_parse_markdown_table_rows) — encontrado con datos reales.
     text = re.sub(
-        r"[^\w\s.,;:()/\-%¿?!áéíóúñÁÉÍÓÚÑ=+^{}\[\]<>√±≈∞×÷·²³¹⁰-ₜ]",
+        r"[^\w\s.,;:()/\-%¿?!áéíóúñÁÉÍÓÚÑ=+^{}\[\]<>√±≈∞×÷·²³¹⁰-ₜ|]",
         "",
         text,
     )
@@ -805,6 +903,235 @@ async def chunk_text(text: str) -> List[Dict[str, Any]]:
             "text": chunk.strip(),
             "urls": urls if urls else None,
         })
+    return chunks
+
+
+# Formatos con extracción por bloques tipados (tabla/texto) disponible —
+# los únicos que hoy pasan por chunk_structured_blocks() en vez del
+# chunk_text() clásico por conteo de caracteres. pptx/xlsx/ppt/imagen
+# siguen el camino de siempre sin cambios.
+_STRUCTURED_BLOCK_EXTRACTORS = {"pdf", "docx"}
+
+
+async def _extract_blocks_for_structured_chunking(file_path: str) -> Optional[List[Dict[str, Any]]]:
+    """None si el tipo de archivo no tiene extracción por bloques todavía
+    (el caller debe caer al camino clásico extract_normalize_and_hash() +
+    chunk_text())."""
+    file_type = classify_file_type(Path(file_path).name)
+    if file_type == "pdf":
+        return await _extract_from_pdf_blocks(file_path)
+    if file_type == "docx":
+        return await _extract_from_docx_blocks(file_path)
+    return None
+
+
+async def extract_normalize_and_hash_blocks(file_path: str) -> Optional[Dict[str, Any]]:
+    """Variante de extract_normalize_and_hash() que conserva los bloques
+    tipados (tabla/texto/página) en vez de aplanarlos — la normalización
+    (limpieza de caracteres de control, colapso de espacios) se aplica
+    bloque por bloque para no perder la distinción tabla/texto. Devuelve
+    None si el formato no tiene extracción por bloques (ver
+    _STRUCTURED_BLOCK_EXTRACTORS) — el caller debe usar el camino clásico
+    en ese caso."""
+    blocks = await _extract_blocks_for_structured_chunking(file_path)
+    if blocks is None:
+        return None
+
+    normalized_blocks = []
+    for b in blocks:
+        norm_text = await _normalize_text(b["text"])
+        if norm_text:
+            normalized_blocks.append({**b, "text": norm_text})
+
+    full_text = "\n".join(b["text"] for b in normalized_blocks)
+    if len(full_text) < 100:
+        raise ValueError("Documento sin contenido de texto suficiente")
+
+    return {
+        "blocks": normalized_blocks,
+        "document_hash": _generate_hash(full_text),
+    }
+
+
+def table_signature(md_text: str) -> Optional[Tuple[str, ...]]:
+    """"Huella" de una tabla, usada para detectar si su ESTRUCTURA se
+    repite en otros documentos del mismo curso (ej. cada sesión semanal
+    trae su propia mini tabla "Datos Generales" sin completar, con las
+    mismas 14 etiquetas de campo que la del sílabo real, pero vacía) —
+    ver caller en el script de vectorización por lote, que decide con
+    esto qué tablas NO conviene partir en filas (ver
+    chunk_structured_blocks(..., repeated_signatures=...)).
+
+    Para una tabla de 3+ columnas reales, la firma son sus encabezados de
+    columna. Para una lista campo/valor de 2 columnas (sin encabezado
+    real — ver _parse_markdown_table_rows), la firma es el conjunto de
+    NOMBRES DE CAMPO (columna izquierda) de todas sus filas — dos
+    documentos con la misma lista de campos (aunque los valores sean
+    distintos) tienen la misma firma. None si la tabla no tiene una
+    estructura reconocible (una sola columna)."""
+    rows = _parse_markdown_table_rows(md_text)
+    if not rows:
+        return None
+    if len(rows) == 1 and "" in rows[0]:
+        return None  # tabla de una sola columna, sin estructura campo/valor
+    if all(len(r) == 1 for r in rows):
+        # 2 columnas (lista campo/valor): la firma son los nombres de campo.
+        keys = tuple(sorted({k for r in rows for k in r if k}))
+        return keys or None
+    # 3+ columnas reales: la firma son los encabezados de columna (mismas
+    # claves en cada fila).
+    keys = tuple(sorted(rows[0].keys()))
+    return keys or None
+
+
+def chunk_structured_blocks(
+    blocks: List[Dict[str, Any]],
+    repeated_signatures: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """Chunking consciente de tablas: agrupa bloques de texto/prosa
+    consecutivos hasta acercarse a CHUNK_SIZE (mismo criterio de
+    separadores que chunk_text()/RecursiveCharacterTextSplitter), pero a
+    diferencia de chunk_text() una TABLA nunca se mezcla con texto vecino
+    ni se parte a la mitad de una fila — cada tabla es su propio chunk (o,
+    si es enorme, se parte solo dentro de sí misma, por filas/líneas de su
+    propio Markdown).
+
+    Nace de un caso real: la tabla "DATOS GENERALES" de un sílabo (14
+    campos administrativos, incluido el nombre del docente) quedaba
+    mezclada con texto narrativo vecino por chunk_text() clásico — el
+    chunk resultante tenía tan poca especificidad temática (14 campos sin
+    relación entre sí) que perdía en el ranking de retrieval contra
+    chunks de prosa que solo repetían la palabra buscada. Separar la
+    tabla en su propio chunk no cambia el contenido, pero le da un
+    embedding/score BM25 enfocado solo en esos 14 campos, sin dilución.
+
+    Cada chunk resultante suma dos campos nuevos frente a chunk_text():
+    `chunk_type` ("table"/"prose"/"table_row") y `page` (número de página
+    real para PDF — antes no existía a nivel de chunk; sigue None para
+    DOCX, que no tiene concepto nativo de página).
+
+    Fase 3.5 — además del chunk de tabla completa, cada FILA de la tabla
+    se suma como un chunk propio (`chunk_type="table_row"`, vía
+    _parse_markdown_table_rows). Es la capa que faltaba para tablas con
+    varias filas heterogéneas: aislar la tabla entera no alcanza cuando la
+    pregunta apunta a UNA fila puntual entre varias temáticamente
+    distintas (visto en un caso real: "Examen sumativo 20%" perdido dentro
+    de una tabla de 6 componentes de evaluación). No reemplaza la tabla
+    completa — ambas conviven, cada una útil para preguntas distintas
+    ("¿cuánto vale el examen?" vs "dame toda la tabla de evaluación").
+
+    `repeated_signatures`: firmas (ver table_signature()) de tablas cuya
+    ESTRUCTURA se repite en otros documentos del mismo curso — ej. cada
+    sesión semanal trae su propia mini tabla "Datos Generales" sin
+    completar, con las mismas etiquetas de campo que la del sílabo real
+    pero vacía ("Docente: Apellidos y nombres / correo institucional").
+    Si la firma de una tabla está en este set, NO se parte en filas (se
+    deja solo como chunk de tabla completa) — partir 13 plantillas vacías
+    casi idénticas en filas individuales genera decenas de fragmentos
+    cortos y genéricos que, por pura cantidad, ahogan a la única fila real
+    (la del documento que sí tiene los datos completos). Confirmado con
+    datos reales: sin este filtro, "Docente: Apellidos y nombres / correo
+    institucional" (plantilla vacía) ocupaba 4 de los primeros 10 puestos
+    para la pregunta "¿quién es el docente?", por encima de la fila real
+    con el nombre verdadero."""
+    prose_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", ", ", " ", ""],
+    )
+    # Sin overlap y separando por línea/fila — una tabla enorme se parte
+    # por filas de su propio Markdown, nunca a mitad de celda, y nunca se
+    # le pega overlap de la tabla vecina.
+    table_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings.CHUNK_SIZE, chunk_overlap=0,
+        separators=["\n", " ", ""],
+    )
+
+    chunks: List[Dict[str, Any]] = []
+    prose_buffer: List[Dict[str, Any]] = []
+    # Encabezado más cercano detectado por heurística genérica (bloque de
+    # texto corto, sin punto final — no se ancla a ningún texto específico
+    # de ningún documento) — se propaga a los chunks siguientes hasta que
+    # aparece un encabezado nuevo, igual que en cualquier documento real.
+    last_heading: Optional[str] = None
+
+    def _looks_like_heading(text: str) -> bool:
+        t = text.strip()
+        return 0 < len(t) <= 80 and not t.endswith((".", ":", ";", ","))
+
+    def _flush_prose():
+        if not prose_buffer:
+            return
+        combined = "\n\n".join(b["text"] for b in prose_buffer)
+        pages = sorted({b["page"] for b in prose_buffer if b.get("page") is not None})
+        for piece in prose_splitter.split_text(combined):
+            piece = piece.strip()
+            if not piece:
+                continue
+            urls = re.findall(r"https?://\S+", piece)
+            chunks.append({
+                "chunk": len(chunks),
+                "text": piece,
+                "urls": urls or None,
+                "chunk_type": "prose",
+                "page": pages[0] if pages else None,
+                "heading": last_heading,
+            })
+        prose_buffer.clear()
+
+    for block in blocks:
+        if block["type"] == "table":
+            _flush_prose()
+            for piece in table_splitter.split_text(block["text"]):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                urls = re.findall(r"https?://\S+", piece)
+                chunks.append({
+                    "chunk": len(chunks),
+                    "text": piece,
+                    "urls": urls or None,
+                    "chunk_type": "table",
+                    "page": block.get("page"),
+                    "heading": last_heading,
+                })
+            # Fase 3.5 — además de la tabla completa (arriba), cada FILA se
+            # suma como su propio chunk aislado. Necesario para tablas con
+            # varias filas heterogéneas (ej. ponderación de evaluación:
+            # Participación, RSU, Examen sumativo...): el chunk de la tabla
+            # completa diluye la relevancia de una fila puntual entre las
+            # demás — visto en un caso real donde "Examen sumativo 20%"
+            # quedó enterrado (rank 133/189) dentro de una tabla de 6 filas
+            # de temas distintos. No reemplaza la tabla completa (sigue
+            # sirviendo para "dame toda la tabla") — es una capa adicional,
+            # igual que ya se documentó en el diseño de esta fase.
+            #
+            # EXCEPCIÓN: si la firma de esta tabla se repite en otros
+            # documentos del curso (plantilla semanal, ver docstring), no
+            # se parte en filas — solo el chunk de tabla completa de
+            # arriba. Partir 13 plantillas casi idénticas en filas
+            # individuales generaba decenas de fragmentos cortos que
+            # ahogaban a la única fila real por pura cantidad.
+            sig = table_signature(block["text"]) if repeated_signatures else None
+            if sig is not None and sig in repeated_signatures:
+                continue
+            for row in _parse_markdown_table_rows(block["text"]):
+                row_text = " | ".join(f"{k}: {v}" if k else v for k, v in row.items())
+                if not row_text.strip():
+                    continue
+                chunks.append({
+                    "chunk": len(chunks),
+                    "text": row_text,
+                    "urls": None,
+                    "chunk_type": "table_row",
+                    "page": block.get("page"),
+                    "heading": last_heading,
+                })
+        else:
+            if _looks_like_heading(block["text"]):
+                last_heading = block["text"].strip()
+            prose_buffer.append(block)
+    _flush_prose()
     return chunks
 
 
@@ -1109,7 +1436,7 @@ class VectorizationService:
                 collection_name=collection_name,
                 limit=200,
                 offset=offset,
-                with_payload=["filename", "total_chunks", "date", "course_name"],
+                with_payload=["filename", "total_chunks", "date", "course_name", "section_name"],
                 with_vectors=False,
             )
             for point in results:
@@ -1120,6 +1447,7 @@ class VectorizationService:
                         "total_chunks": point.payload.get("total_chunks", 0),
                         "date": point.payload.get("date", ""),
                         "course_name": point.payload.get("course_name", ""),
+                        "section_name": point.payload.get("section_name", ""),
                     }
             if next_offset is None:
                 break
@@ -1146,7 +1474,7 @@ class VectorizationService:
                         match=MatchValue(value=normalized_filename)
                     )
                 ]),
-                with_payload=["document_hash", "total_chunks"],
+                with_payload=["document_hash", "total_chunks", "date", "source_type"],
                 with_vectors=False,
             )
 
@@ -1157,14 +1485,16 @@ class VectorizationService:
                     scroll_filter=Filter(must=[
                         FieldCondition(key="filename", match=MatchValue(value=filename))
                     ]),
-                    with_payload=["document_hash", "total_chunks"],
+                    with_payload=["document_hash", "total_chunks", "date", "source_type"],
                     with_vectors=False,
                 )
 
             if not results:
-                return {"exists": False, "total_chunks": 0, "document_hash": None}
+                return {"exists": False, "total_chunks": 0, "document_hash": None, "date": None, "source_type": None}
 
             doc_hash = results[0].payload.get("document_hash")
+            date = results[0].payload.get("date")
+            source_type = results[0].payload.get("source_type")
 
             all_results, _ = self._client.scroll(
                 collection_name=collection_name,
@@ -1179,10 +1509,12 @@ class VectorizationService:
                 "exists": True,
                 "total_chunks": len(all_results),
                 "document_hash": doc_hash,
+                "date": date,
+                "source_type": source_type,
             }
         except Exception as e:
             print(f"⚠️ Error check_duplicate: {e}")
-            return {"exists": False, "total_chunks": 0, "document_hash": None}
+            return {"exists": False, "total_chunks": 0, "document_hash": None, "date": None, "source_type": None}
 
     # ── Eliminar documento por filename ──────────────────────────
 
@@ -1818,25 +2150,66 @@ class HybridVectorizationService:
             document_hash = _generate_hash(full_text)
             chunks = await chunk_text(full_text)
         else:
-            raw_text = await etl_document.extract(str(file_path))
-            full_text = await _normalize_text(raw_text)
-            if len(full_text) < 100:
-                raise ValueError(
-                    "El documento no contiene suficiente texto extraíble "
-                    "(mínimo 100 caracteres)"
-                )
-            document_hash = _generate_hash(full_text)
-            chunks = await chunk_text(full_text)
+            # Chunking consciente de tablas (ver chunk_structured_blocks): una
+            # tabla nunca se mezcla con texto vecino ni se parte a mitad de
+            # fila, y cada fila se suma como su propio chunk — es lo que hace
+            # posible el Índice de Campos Estructurados (campos_estructurados.py).
+            # Disponible hoy solo para pdf/docx (_STRUCTURED_BLOCK_EXTRACTORS);
+            # cualquier otro formato de documento (pptx/xlsx/imagen) cae al
+            # camino clásico sin cambios.
+            #
+            # `repeated_signatures` se deja siempre vacío ACÁ: distinguir una
+            # tabla-plantilla real (su estructura se repite en 2+ documentos)
+            # de una tabla única requiere ver TODO el curso a la vez, no un
+            # archivo aislado — y este método procesa un archivo por llamada.
+            # Con el valor por defecto, cada tabla se parte en filas como si
+            # fuera única (seguro: nunca produce una respuesta incorrecta,
+            # como mucho unas filas de plantilla vacía de más hasta la
+            # siguiente sincronización). La clasificación correcta se corrige
+            # DESPUÉS, sin re-embeber nada, con
+            # campos_estructurados.sync_after_vectorization() — ver el caller
+            # en core.py, que la llama una vez terminado todo el curso/lote
+            # (con visión de la colección completa, ahí sí se puede decidir
+            # bien qué tablas son plantillas repetidas).
+            blocks_result = await extract_normalize_and_hash_blocks(str(file_path))
+            if blocks_result is not None:
+                document_hash = blocks_result["document_hash"]
+                full_text = "\n".join(b["text"] for b in blocks_result["blocks"])
+                chunks = chunk_structured_blocks(blocks_result["blocks"], repeated_signatures=None)
+            else:
+                raw_text = await etl_document.extract(str(file_path))
+                full_text = await _normalize_text(raw_text)
+                if len(full_text) < 100:
+                    raise ValueError(
+                        "El documento no contiene suficiente texto extraíble "
+                        "(mínimo 100 caracteres)"
+                    )
+                document_hash = _generate_hash(full_text)
+                chunks = await chunk_text(full_text)
 
-        # Contextual Retrieval: cada chunk se enriquece con una cabecera de
-        # 50-100 palabras (si la estrategia activa no es "none") y el texto
-        # que se vectoriza es cabecera+chunk, aunque el payload conserva el
-        # texto crudo por separado.
+        # Contextual Retrieval: cada chunk de PROSA se enriquece con una
+        # cabecera de 50-100 palabras (si la estrategia activa no es "none")
+        # y el texto que se vectoriza es cabecera+chunk, aunque el payload
+        # conserva el texto crudo por separado. Un chunk de tabla/fila de
+        # tabla (chunk_type table/table_row) NO pasa por el enriquecimiento
+        # LLM — un resumen generado de "Docente: Fulano de Tal" agrega poco
+        # y cuesta una llamada más; en su lugar lleva una cabecera
+        # determinística (curso/documento/sección/tipo), igual que ya se
+        # probó y validó para Curso_1472/Curso_1541 esta sesión.
         embed_texts: List[str] = []
         for chunk in chunks:
-            header = ""
-            if use_contextual:
-                header = await contextual.enrich(full_text, chunk["text"])
+            chunk_type = chunk.get("chunk_type", "prose")
+            if chunk_type in ("table", "table_row"):
+                header_parts = [f"Curso: {course_name}"] if course_name else []
+                header_parts.append(f"Documento: {stored_filename}")
+                if chunk.get("heading"):
+                    header_parts.append(f"Sección: {chunk['heading']}")
+                header_parts.append(
+                    f"Tipo: {'tabla de datos' if chunk_type == 'table' else 'fila de tabla'}"
+                )
+                header = " | ".join(header_parts)
+            else:
+                header = await contextual.enrich(full_text, chunk["text"]) if use_contextual else ""
             chunk["contextual_header"] = header
             embed_texts.append(f"{header}\n\n{chunk['text']}" if header else chunk["text"])
 
@@ -1875,6 +2248,17 @@ class HybridVectorizationService:
                     "source_type": self._config.source_type,
                     "embedding_model": self._config.dense_strategy,
                     "sparse_model": self._config.sparse_strategy,
+                    # chunk_type/page/is_repeated_template: solo tienen valor
+                    # real para pdf/docx vía chunk_structured_blocks (arriba);
+                    # para el resto de formatos chunk_type queda en "prose"
+                    # (valor por defecto, sin romper compatibilidad con el
+                    # campos_estructurados.py existente, que solo actúa sobre
+                    # chunk_type table/table_row). is_repeated_template se dejar
+                    # siempre False acá — se corrige después, ver
+                    # campos_estructurados.sync_after_vectorization().
+                    "chunk_type": chunk.get("chunk_type", "prose"),
+                    "page": chunk.get("page"),
+                    "is_repeated_template": False,
                 },
             })
 

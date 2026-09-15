@@ -582,6 +582,33 @@ async def qdrant_delete_document(collection_name: str, filename: str):
         raise HTTPException(500, str(e))
 
 
+@app.get("/api/collections/{collection_name}/documents/{filename:path}/chunks", tags=["Gestión Qdrant"])
+async def qdrant_document_chunks(collection_name: str, filename: str):
+    """Detalle de cada chunk (texto y metadata) de un documento — para
+    inspección puntual, a diferencia del resumen agregado de /documents."""
+    try:
+        return get_qdrant_admin().get_document_chunks(collection_name, filename)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.patch("/api/collections/{collection_name}/documents/{filename:path}/source-type", tags=["Gestión Qdrant"])
+async def qdrant_set_document_source_type(
+    collection_name: str, filename: str,
+    source_type: str = Query(..., description="'curso_propio' o 'bibliografia'"),
+):
+    """Recategoriza un documento ya vectorizado (curso_propio/bibliografia)
+    sin tener que re-vectorizarlo — actualiza el payload de todos sus chunks."""
+    try:
+        return get_qdrant_admin().set_document_source_type(collection_name, filename, source_type)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # ═══════════════════════════════════════════════════════════════════
 # RD (aulas)  /api/rds/*
 # ═══════════════════════════════════════════════════════════════════
@@ -972,6 +999,10 @@ async def asistente_chat_page(
         asistente["id"], courseid, effective_userid, moodle_username, fullname, collection_name, saludo,
     )
     historial_rows = await db.run(assistants.get_mensajes, sesion["id"])
+    # El saludo (siempre el primer mensaje, ver assistants.split_welcome) se
+    # separa acá — se muestra en su propio bloque fijo, no como un turno
+    # más de la lista de mensajes que scrollea (ver asistente_chat.html).
+    _, historial_rows = assistants.split_welcome(historial_rows)
     # id/rol/contenido/calificacion: escalares simples, no rompen el
     # `tojson` de Jinja (a diferencia de fuentes_json/config_usado_json/
     # created_at, que sí traen tipos no serializables).
@@ -995,6 +1026,7 @@ async def asistente_chat_page(
             "mensaje_bienvenida": asistente.get("mensaje_bienvenida"),
             "sesion_id": sesion["id"],
             "saludo_nombre": fullname or "",
+            "saludo": saludo,
             "historial": historial,
             "reencuentro": reencuentro,
             "max_actividades_sesion": asistente.get("max_actividades_sesion", 10),
@@ -1156,7 +1188,8 @@ async def asistente_ver_conversacion(
     ):
         raise HTTPException(404, "Conversación no encontrada.")
     historial = await db.run(assistants.get_mensajes, sesion_id)
-    return {"sesion_id": sesion_id, "historial": historial}
+    saludo, historial = assistants.split_welcome(historial)
+    return {"sesion_id": sesion_id, "historial": historial, "saludo": saludo}
 
 
 async def _validar_sesion_del_alumno(token: str, sesion_id: int, courseid: int, userid: int) -> Dict[str, Any]:

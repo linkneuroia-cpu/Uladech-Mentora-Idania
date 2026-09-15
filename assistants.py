@@ -6,7 +6,7 @@ token/URL pública, y helpers de sesión/mensajes usados por la ruta pública
 del asistente (ver app.py `/asistente/{token}`).
 """
 import secrets
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import db
 from settings import settings
@@ -461,6 +461,18 @@ def get_mensajes(sesion_id: int) -> List[Dict[str, Any]]:
     return db.fetch_all(
         "SELECT * FROM asistente_mensajes WHERE sesion_id = %s ORDER BY created_at", (sesion_id,)
     )
+
+
+def split_welcome(historial_rows: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """Separa el saludo inicial (SIEMPRE el primer mensaje de la sesión,
+    rol='assistant', insertado por get_or_create_sesion vía save_mensaje())
+    del resto de la conversación real. Usado por la ruta pública para que
+    el saludo se muestre aparte, como presentación fija del asistente — no
+    como un turno más del chat que scrollea junto con las preguntas y
+    respuestas reales (ver asistente_chat.html)."""
+    if historial_rows and historial_rows[0]["rol"] == "assistant":
+        return historial_rows[0]["contenido"], historial_rows[1:]
+    return None, historial_rows
 
 
 def get_recent_history(sesion_id: int, max_pairs: int = 30) -> List[Dict[str, str]]:

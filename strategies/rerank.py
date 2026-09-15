@@ -159,10 +159,24 @@ def _extract_week_number(text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _extract_all_week_numbers(text: str) -> List[int]:
+    """Igual que _extract_week_number pero devuelve TODOS los números de
+    semana/sesión distintos mencionados (no solo el primero) — necesario
+    para preguntas que comparan/relacionan 2+ semanas explícitas (ver
+    apply_week_boost)."""
+    seen: List[int] = []
+    for m in _WEEK_NUM_RE.finditer(text or ""):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
 def apply_week_boost(candidates: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
-    """Si la pregunta menciona un número de semana/sesión puntual ("¿de qué
-    trata la tarea de la semana 2?"), sube al frente los candidatos cuyo
-    section_name o filename mencionen ese mismo número.
+    """Si la pregunta menciona uno o más números de semana/sesión puntuales
+    ("¿de qué trata la tarea de la semana 2?", "compara la semana 11 con
+    la semana 12"), sube al frente los candidatos cuyo section_name o
+    filename mencionen CUALQUIERA de esos números.
 
     Por qué hace falta: sin reranker real (ver NoOpRerankStrategy — se
     desactivó por el costo en CPU sin GPU, ~28s/consulta), la única señal
@@ -179,22 +193,36 @@ def apply_week_boost(candidates: List[Dict[str, Any]], query: str) -> List[Dict[
     falta ningún modelo para aprovecharla.
 
     No afecta ninguna pregunta que no mencione una semana/sesión (retorna
-    la lista igual, sin tocar el orden)."""
-    query_week = _extract_week_number(query)
-    if query_week is None:
+    la lista igual, sin tocar el orden). Preguntas de comparación/relación
+    entre 2+ semanas ("¿cómo se relaciona la semana 9 con la semana 10?")
+    boostean candidatos de AMBAS, no solo la primera mencionada — antes
+    solo se tomaba _extract_week_number (la primera), y la segunda semana
+    quedaba sin ayuda ninguna, lo que producía respuestas incompletas
+    ("no tengo información sobre la semana 12") en preguntas de
+    comparación aunque la evidencia de esa semana sí existiera en la
+    colección — encontrado con datos reales en la evaluación de 218
+    preguntas (categoría F, comparación/integración)."""
+    query_weeks = _extract_all_week_numbers(query)
+    if not query_weeks:
         return candidates
 
     max_score = max((c.get("boosted_score", 0.0) for c in candidates), default=0.0)
     for c in candidates:
         payload = c.get("payload", {})
-        matches = (
-            _extract_week_number(payload.get("section_name") or "") == query_week
-            or _extract_week_number(payload.get("filename") or "") == query_week
+        candidate_weeks = set(_extract_all_week_numbers(payload.get("section_name") or "")) | set(
+            _extract_all_week_numbers(payload.get("filename") or "")
         )
-        if matches:
+        if candidate_weeks & set(query_weeks):
             # Por encima del máximo existente — garantiza que quede
             # primero sin importar cuán bajo haya puntuado el fusion
             # RRF/dense+sparse original.
             c["boosted_score"] = max_score + 1.0 + c.get("boosted_score", 0.0)
 
     return sorted(candidates, key=lambda c: c["boosted_score"], reverse=True)
+
+
+# El router de metadata basado en patrones regex curados a mano (Fase 3.7)
+# fue retirado tras comprobar con evaluación real que el Índice de Campos
+# Estructurados (campos_estructurados.py) iguala sus métricas sin ninguna
+# regla específica de campo/curso/documento — ver informe
+# "Indice de Campos Estructurados - Informe Final.docx" en Data prueba/.

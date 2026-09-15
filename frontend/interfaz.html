@@ -273,15 +273,19 @@ tr:hover td{background:var(--neutral-100)}
 /* TREE */
 .tree-mod{border:1px solid var(--neutral-300);border-radius:var(--radius);margin-bottom:9px;overflow:hidden}
 .tree-mhdr{display:flex;align-items:center;gap:9px;padding:9px 13px;
-  background:var(--neutral-200);cursor:pointer;user-select:none}
+  background:var(--neutral-200);cursor:pointer;user-select:none;
+  border-bottom:1px solid var(--neutral-300)}
 .tree-mhdr:hover{background:var(--neutral-300)}
-.tree-mname{font-weight:600;font-size:13px;color:var(--gray-700);flex:1}
-.tree-mcnt{font-size:11px;color:var(--gray-500)}
+.tree-mname{font-weight:700;font-size:12px;color:var(--purple-700);flex:1;
+  text-transform:uppercase;letter-spacing:.03em}
+.tree-mcnt{font-weight:600;font-size:11px;color:var(--gray-450)}
 .tree-row{display:flex;align-items:center;gap:9px;padding:8px 13px;
   border-top:1px solid var(--neutral-200);transition:background var(--t)}
 .tree-row:hover{background:var(--neutral-100)}
+.tree-row.tree-row-done{background:var(--neutral-100)}
 .tree-row label{flex:1;font-size:13px;color:var(--gray-800);cursor:pointer;
   display:flex;align-items:center;gap:7px}
+.tree-row-done label{cursor:default;color:var(--gray-500)}
 .tree-sz{font-size:11px;color:var(--gray-450);white-space:nowrap}
 input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(--blue-650);flex-shrink:0;cursor:pointer}
 
@@ -304,6 +308,20 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
 .di-info{flex:1;min-width:0}
 .di-name{font-weight:600;font-size:13px;color:var(--gray-800);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .di-meta{font-size:11px;color:var(--gray-450);margin-top:2px}
+
+/* Detalle de chunks (ver qViewChunks) */
+.chunk-list{display:flex;flex-direction:column;gap:9px;max-height:65vh;overflow-y:auto}
+.chunk-card{border:1px solid var(--neutral-300);border-radius:var(--radius);padding:10px 12px;background:#fff}
+.chunk-meta{font-size:11px;font-weight:600;color:var(--purple-700,var(--blue-700));text-transform:uppercase;letter-spacing:.03em;margin-bottom:5px}
+.chunk-ctxhdr{font-size:11px;color:var(--gray-500);font-style:italic;margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed var(--neutral-300)}
+.chunk-text{font-size:12.5px;line-height:1.5;color:var(--gray-800);white-space:pre-wrap;word-break:break-word}
+
+/* Agrupación de documentos por semana/sección (ver groupDocsBySemana) */
+.di-semgroup{display:flex;flex-direction:column;gap:7px;margin-bottom:14px}
+.di-semhdr{font-weight:700;font-size:12px;color:var(--purple-700);text-transform:uppercase;
+  letter-spacing:.03em;padding:2px 2px 4px;border-bottom:1px solid var(--neutral-300);
+  display:flex;align-items:center;gap:8px}
+.di-semcnt{font-weight:600;font-size:11px;color:var(--gray-450);text-transform:none;letter-spacing:0}
 
 /* SOURCE OPTIONS */
 .srcs{display:flex;gap:11px;margin-bottom:0}
@@ -1124,6 +1142,22 @@ const S={semi:{col:'',files:[],jobId:null,sourceType:'curso_propio'},auto:{col:'
 
 function aFileSourceType(filename){return S.auto.fileSourceTypes[filename]||'curso_propio'}
 function aSetFileSourceType(filename,value){S.auto.fileSourceTypes[filename]=value}
+
+// Recategoriza (curso_propio/bibliografia) un documento YA vectorizado sin
+// tener que re-vectorizarlo — actualiza el payload de sus chunks en Qdrant
+// directamente (ver /api/collections/{col}/documents/{filename}/source-type).
+async function aEditExistingSourceType(filename,value,selectEl){
+  selectEl.disabled=true;
+  try{
+    await api(`{{ URL_PREFIX }}/api/collections/${encodeURIComponent(S.auto.col)}/documents/${encodeURIComponent(filename)}/source-type?source_type=${encodeURIComponent(value)}`,{method:'PATCH'});
+    S.auto.mods.forEach(m=>m.files.forEach(f=>{if(f.filename===filename)f.existing_source_type=value;}));
+  }catch(e){
+    showModal('Error',`<p>No se pudo actualizar: ${esc(e.message)}</p>`);
+    aRenderTree(); // revierte el <select> al valor real
+  }finally{
+    selectEl.disabled=false;
+  }
+}
 function aMarkSelected(value){
   S.auto.sel.forEach(fn=>{S.auto.fileSourceTypes[fn]=value});
   aRenderTree();
@@ -1827,6 +1861,9 @@ function asisWizStep3HTML(){
         </label>
         <div class="fh">Sin marcar: asistente institucional sin curso detrás (p.ej. un FAQ general) — elegís vos el nombre de su colección, en vez de tomarlo de un Course ID.</div>
       </div>
+      <div class="fg"><label class="fl">Métrica de distancia</label>${qDistanceFieldHTML('wiz-normal',null)}
+        <div class="fh">Solo aplica si la colección todavía no existe (se crea con esta métrica). Si ya existe, se usa la que tenga.</div>
+      </div>
       <div id="wiz-normal-course-box">${asisWizNormalCourseBoxHTML()}</div>
       <div id="wiz-normal-status" class="fh"></div>`;
   }
@@ -1939,7 +1976,7 @@ async function asisWizSetNormalSinCurso(){
       ]);
       const created=await api('{{ URL_PREFIX }}/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
         name, vector_schema:'hybrid', dense_strategy:denseInfo.current, sparse_strategy:sparseInfo.current,
-        rd_id:null, moodle_courseid:null,
+        distance:qDistanceFieldValue('wiz-normal',null), rd_id:null, moodle_courseid:null,
       })});
       col={name:created.collection_name};
       // Colección recién creada: se sabe con qué embedding, así que se fija
@@ -1982,7 +2019,7 @@ async function asisWizSetNormalCourse(){
       const denseInfo=await api('{{ URL_PREFIX }}/api/config/dense');
       const created=await api('{{ URL_PREFIX }}/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
         name:`Curso_${courseId}`, vector_schema:'hybrid', dense_strategy:denseInfo.current,
-        rd_id:null, moodle_courseid:parseInt(courseId),
+        distance:qDistanceFieldValue('wiz-normal',null), rd_id:null, moodle_courseid:parseInt(courseId),
       })});
       col={name:created.collection_name};
     }
@@ -2441,6 +2478,53 @@ async function aPreview(){
   finally{btn.disabled=false;btn.textContent='Consultar';}
 }
 
+// Agrupa una lista de documentos por su section_name real (el dato
+// "Semana N : ..." que ya trae cada punto vectorizado, ver definitions.py)
+// -- genérico: no depende de ningún curso/semana en particular, solo del
+// campo section_name que cada colección ya tiene.
+//
+// Un mismo archivo puede pertenecer a VARIAS semanas/sesiones distintas
+// (p.ej. una bibliografía compartida), y en ese caso section_name las trae
+// unidas con "; ". Pero OJO: la descripción de una sola semana también
+// puede tener un ";" como puntuación normal dentro del texto (ej. real:
+// "Semana 05 : Fundamentos básicos... evolución de instrumentos dentales y
+// anestésicos; relación con la práctica odontológica moderna." es UNA sola
+// semana, no dos). Por eso solo se separa en varias secciones cuando CADA
+// parte resultante, por separado, ya menciona su propio número de semana/
+// sesión -- si no, es puntuación interna y se deja el texto completo como
+// una sola etiqueta.
+const _SEMANA_LABEL_RE=/(?:sem[aá]na|sen[aá]na|sesi[oó]n)\s*[°ºn]?\.?\s*0*(\d{1,2})\b/i;
+function groupDocsBySemana(docs,sectionKey){
+  sectionKey=sectionKey||'section_name';
+  const NO_SEMANA='General / sin semana';
+  const groups={};
+  docs.forEach(doc=>{
+    const raw=(doc[sectionKey]||'').trim();
+    let labels;
+    if(!raw){
+      labels=[NO_SEMANA];
+    }else{
+      const parts=raw.split(';').map(s=>s.trim()).filter(Boolean);
+      labels=(parts.length>1&&parts.every(p=>_SEMANA_LABEL_RE.test(p)))?parts:[raw];
+    }
+    labels.forEach(label=>{(groups[label]=groups[label]||[]).push(doc);});
+  });
+  const weekNum=label=>{const m=label.match(_SEMANA_LABEL_RE);return m?parseInt(m[1],10):null;};
+  // Las secciones que NO son "Semana N" (General, u otro rótulo real sin
+  // número) van primero; entre las numeradas, orden ascendente por semana.
+  return Object.keys(groups).sort((a,b)=>{
+    const na=weekNum(a),nb=weekNum(b);
+    if(na===null&&nb===null){
+      if(a===NO_SEMANA)return -1;
+      if(b===NO_SEMANA)return 1;
+      return a.localeCompare(b);
+    }
+    if(na===null)return -1;
+    if(nb===null)return 1;
+    return na-nb;
+  }).map(label=>({label,docs:groups[label]}));
+}
+
 // Cuenta archivos nuevos (no duplicados) por file_type entre todos los modulos
 function typeCounts(mods,key){
   const counts={};
@@ -2488,27 +2572,46 @@ function aRenderTree(){
   const repeats=computeRepeats(S.auto.mods);
   const totalNew=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>!f.is_duplicate).length,0);
   const totalDup=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>f.is_duplicate).length,0);
-  $('auto-file-cnt').textContent=`${totalNew} archivo(s) nuevo(s) en ${S.auto.mods.length} módulo(s)`+(totalDup>0?` · ${totalDup} duplicado(s) oculto(s)`:'');
+  $('auto-file-cnt').textContent=`${totalNew} archivo(s) pendiente(s) en ${S.auto.mods.length} módulo(s)`+(totalDup>0?` · ${totalDup} ya vectorizado(s)`:'');
   const counts=typeCounts(S.auto.mods,'files');
   $('auto-tfilter').innerHTML=typeFilterHTML(counts,filter,'aToggleType');
-  $('auto-tree').innerHTML=S.auto.mods.map((mod,mi)=>{
-    const rows=mod.files.map((f,fi)=>({f,fi})).filter(({f})=>{
-      if(f.is_duplicate||(filter&&!filter.has(f.file_type)))return false;
-      const occ=repeats[f.filename];
-      if(occ&&occ.length>1&&occ.every(o=>o.fileurl===occ[0].fileurl)&&occ[0].mi!==mi)return false; // ya se muestra en su primera semana
-      return true;
-    });
-    if(rows.length===0)return''; // ocultar módulos sin archivos visibles
+
+  // Se aplanan los archivos de TODOS los módulos de Moodle y se agrupan
+  // con groupDocsBySemana() — la MISMA función y el mismo criterio real
+  // (número de semana/sesión, orden, "General" primero) que ya usa
+  // "Colecciones por semana" en Gestión Qdrant — en vez de un árbol en el
+  // orden de módulos que devuelva Moodle. mod.module_name es el mismo
+  // dato que termina guardado como section_name al vectorizar (ver
+  // definitions.py), así que ambas vistas quedan consistentes.
+  const flat=[];
+  S.auto.mods.forEach((mod,mi)=>mod.files.forEach((f,fi)=>{
+    if(filter&&!filter.has(f.file_type))return;
+    const occ=repeats[f.filename];
+    if(occ&&occ.length>1&&occ.every(o=>o.fileurl===occ[0].fileurl)&&occ[0].mi!==mi)return; // ya se muestra en su primera semana
+    flat.push({f,mi,fi,module_name:mod.module_name});
+  }));
+  const semGroups=groupDocsBySemana(flat,'module_name');
+
+  $('auto-tree').innerHTML=semGroups.map(({label,docs:rows},gi)=>{
+    const pendCount=rows.filter(({f})=>!f.is_duplicate).length;
+    const doneCount=rows.length-pendCount;
     return`<div class="tree-mod">
-      <div class="tree-mhdr" onclick="aTog(${mi})">
-        <span>📁</span><span class="tree-mname">${esc(mod.module_name)}</span>
-        <span class="tree-mcnt">${rows.length} archivo(s)</span><span id="aa${mi}">▾</span>
+      <div class="tree-mhdr" onclick="aTog(${gi})">
+        <span class="tree-mname">${esc(label)}</span>
+        <span class="tree-mcnt">${pendCount} pendiente(s)${doneCount>0?` · ${doneCount} ya vectorizado(s)`:''}</span><span id="aa${gi}">▾</span>
       </div>
-      <div id="ab${mi}">
-        ${rows.map(({f,fi})=>{
+      <div id="ab${gi}">
+        ${rows.map(({f,mi,fi})=>{
+          // A diferencia de antes, los archivos YA vectorizados
+          // (is_duplicate) ya NO se ocultan — se muestran igual que los
+          // pendientes, pero con el checkbox bloqueado (marcado, sin
+          // poder desmarcarlo): así cada semana se ve completa (qué falta
+          // y qué ya está).
           const ft=fileTypeMeta(f.file_type);
           const unsupported=f.file_type==='other';
-          const checked=S.auto.sel.includes(f.filename);
+          const done=!!f.is_duplicate;
+          const checked=done||S.auto.sel.includes(f.filename);
+          const locked=done||unsupported;
           const occ=repeats[f.filename];
           let repeatBadge='';
           if(occ&&occ.length>1){
@@ -2518,17 +2621,29 @@ function aRenderTree(){
               ?`<span class="tag t-new" title="Mismo archivo, también enlazado en estos módulos">🔁 también en: ${others.join(', ')}</span>`
               :`<span class="tag t-warn" title="Nombre igual pero es un archivo DISTINTO en Moodle — se procesan ambos por separado">⚠️ nombre repetido en: ${others.join(', ')} (archivo distinto)</span>`;
           }
+          const statusBadge=done
+            ?`<span class="tag t-dup" title="Ya está vectorizado en esta colección">🔒 Ya vectorizado</span>`
+            :`<span class="tag ${unsupported?'t-err':'t-new'}">${unsupported?'✕ No soportado':'✓ '+ft.label}</span>`;
+          const doneDate=(f.existing_date||'').slice(0,10);
+          const uploadDate=f.moodle_upload_date||'';
           return `
-          <div class="tree-row">
-            <input type="checkbox" id="ac${mi}_${fi}" data-fn="${esc(f.filename)}" onchange="aTick(${mi},${fi})" ${unsupported?'disabled':''} ${checked?'checked':''}>
+          <div class="tree-row${done?' tree-row-done':''}">
+            <input type="checkbox" id="ac${mi}_${fi}" data-fn="${esc(f.filename)}" onchange="aTick(${mi},${fi})" ${locked?'disabled':''} ${checked?'checked':''} title="${done?'Ya vectorizado — no seleccionable':''}">
             <label for="ac${mi}_${fi}"><span style="color:var(--red-700)">${ft.icon}</span>${esc(f.filename)}
-              <span class="tag ${unsupported?'t-err':'t-new'}">${unsupported?'✕ No soportado':'✓ '+ft.label}</span>
+              ${statusBadge}
+              ${uploadDate?`<span class="tag" style="background:var(--neutral-200);color:var(--gray-500)" title="Fecha en que el archivo se cargó/editó en Moodle">📤 ${uploadDate}</span>`:''}
+              ${done&&doneDate?`<span class="tag" style="background:var(--neutral-200);color:var(--gray-500)" title="Fecha en que se vectorizó">🗓 ${doneDate}</span>`:''}
               ${repeatBadge}
             </label>
-            <select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aSetFileSourceType(${JSON.stringify(f.filename)},this.value)' title="Tipo de contenido para el tutor">
-              <option value="curso_propio" ${aFileSourceType(f.filename)==='curso_propio'?'selected':''}>🎓 Curso</option>
-              <option value="bibliografia" ${aFileSourceType(f.filename)==='bibliografia'?'selected':''}>📚 Bibliografía</option>
-            </select>
+            ${done
+              ?`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aEditExistingSourceType(${JSON.stringify(f.filename)},this.value,this)' title="Recategorizar este documento ya vectorizado (curso propio / bibliografía) sin re-vectorizarlo">
+                <option value="curso_propio" ${f.existing_source_type==='curso_propio'?'selected':''}>🎓 Curso</option>
+                <option value="bibliografia" ${f.existing_source_type==='bibliografia'?'selected':''}>📚 Bibliografía</option>
+              </select>`
+              :`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aSetFileSourceType(${JSON.stringify(f.filename)},this.value)' title="Tipo de contenido para el tutor">
+                <option value="curso_propio" ${aFileSourceType(f.filename)==='curso_propio'?'selected':''}>🎓 Curso</option>
+                <option value="bibliografia" ${aFileSourceType(f.filename)==='bibliografia'?'selected':''}>📚 Bibliografía</option>
+              </select>`}
             ${f.fileurl?`<a href="${esc(f.fileurl)}" target="_blank" rel="noopener" class="tag" style="text-decoration:none" onclick="event.stopPropagation()" title="Abrir el archivo original">👁 Ver</a>`:''}
             <span class="tree-sz">${fmt(f.filesize)}</span>
           </div>`;
@@ -2536,8 +2651,8 @@ function aRenderTree(){
       </div>
     </div>`;
   }).join('');
-  if(totalNew===0){
-    $('auto-tree').innerHTML='<div class="alert a-info"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div><div class="a-ttl">Sin archivos nuevos</div>Todos los archivos del curso ya están vectorizados en la colección. Usa el módulo de <strong>Actualización</strong> si deseas reemplazar alguno.</div></div>';
+  if(totalNew===0&&totalDup===0){
+    $('auto-tree').innerHTML='<div class="alert a-info"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div><div class="a-ttl">Sin archivos</div>No se encontraron archivos en este curso.</div></div>';
   }else if($('auto-tree').innerHTML===''){
     $('auto-tree').innerHTML='<div class="alert a-info"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div><div class="a-ttl">Sin archivos de este tipo</div>Prueba con otro filtro.</div></div>';
   }
@@ -2668,13 +2783,17 @@ async function uLoadDocs(){
     const docs=d.documents||[];
     $('upd-dl').innerHTML=docs.length===0
       ?'<p class="muted">No hay documentos vectorizados en esta colección.</p>'
-      :docs.map(doc=>`<div class="di" onclick="uSelDoc('${esc(doc.filename)}',this)">
-          <span style="font-size:19px;color:var(--red-700)">📄</span>
-          <div class="di-info">
-            <div class="di-name">${esc(doc.filename)}</div>
-            <div class="di-meta">${doc.total_chunks} chunks · ${esc(doc.course_name||'—')} · ${(doc.date||'').slice(0,10)}</div>
-          </div>
-          <span style="color:var(--gray-450);font-size:17px">›</span>
+      :groupDocsBySemana(docs).map(({label,docs})=>`
+        <div class="di-semgroup">
+          <div class="di-semhdr">${esc(label)} <span class="di-semcnt">${docs.length}</span></div>
+          ${docs.map(doc=>`<div class="di" onclick="uSelDoc('${esc(doc.filename)}',this)">
+              <span style="font-size:19px;color:var(--red-700)">📄</span>
+              <div class="di-info">
+                <div class="di-name">${esc(doc.filename)}</div>
+                <div class="di-meta">${doc.total_chunks} chunks · ${esc(doc.course_name||'—')} · ${(doc.date||'').slice(0,10)}</div>
+              </div>
+              <span style="color:var(--gray-450);font-size:17px">›</span>
+            </div>`).join('')}
         </div>`).join('');
     hide('upd-dll');show('upd-dl');
   }catch(e){
@@ -3278,12 +3397,13 @@ async function qLoadCols(){
         <td>${c.rd_nombre?`${esc(c.rd_nombre)} · curso ${c.moodle_courseid}`:'<span class="muted">— Sin asignar —</span>'}</td>
         <td>${qSchemaTag(c.vector_schema)}${(c.vector_schema_db&&c.vector_schema_db!==c.vector_schema)
           ?` <span class="muted" title="En Postgres figura como ${esc(c.vector_schema_db)}">⚠️</span>`
-          :(!c.vector_schema_db?' <span class="muted" title="Sin registrar en Postgres (colección previa a la migración)">·</span>':'')}</td>
+          :(!c.vector_schema_db?' <span class="muted" title="Sin registrar en Postgres (colección previa a la migración)">·</span>':'')}
+          <div class="fh">Distancia: ${esc(c.distance||'—')}</div></td>
         <td>${c.points_count}</td>
         <td>${esc(c.status)}</td>
         <td>${qMigracionCellHTML(c)}</td>
         <td>
-          <button class="btn btn-ghost btn-sm" onclick='qEditRd(${JSON.stringify(c.name)},${c.rd_id??'null'},${c.moodle_courseid??'null'})'>Editar</button>
+          <button class="btn btn-ghost btn-sm" onclick='qEditRd(${JSON.stringify(c.name)},${c.rd_id??'null'},${c.moodle_courseid??'null'},${JSON.stringify(c.distance||null)})'>Editar</button>
           <button class="btn btn-ghost btn-sm" onclick="qViewDocs('${esc(c.name)}')">Documentos</button>
           <button class="btn btn-danger btn-sm" onclick="qDeleteCol('${esc(c.name)}',${c.points_count})">Eliminar</button>
         </td>
@@ -3301,25 +3421,30 @@ function qEditEsPadre(rd,courseId){
   return !!(rd&&courseId!=null&&String(rd.moodle_courseid)===String(courseId));
 }
 
-function qEditRdEmbeddingHTML(rd,courseId){
+function qEditRdEmbeddingHTML(rd,courseId,distance){
+  // `distance`: valor REAL leído de Qdrant para ESTA colección puntual
+  // (c.distance, ver qLoadCols) — se usa como respaldo/verificación en
+  // todos los casos, y es la ÚNICA fuente para una colección "normal"
+  // (sin RD, rd.distance no existe porque no hay RD de la que heredar).
   const esPadre=qEditEsPadre(rd,courseId);
   if(rd&&rd.dense_strategy&&!esPadre){
-    return `<div class="alert a-info mt8">🔗 Colección <b>hija</b> de esta RD — usa el embedding maestro: <b>${esc(rd.dense_strategy)}</b> / <b>${esc(rd.sparse_strategy||'bm25')}</b>. No se puede cambiar acá (afectaría la búsqueda de todas las colecciones de la RD).</div>`;
+    return `<div class="alert a-info mt8">🔗 Colección <b>hija</b> de esta RD — usa el embedding maestro: <b>${esc(rd.dense_strategy)}</b> / <b>${esc(rd.sparse_strategy||'bm25')}</b>, distancia <b>${esc(rd.distance||distance||'Cosine')}</b>. No se puede cambiar acá (afectaría la búsqueda de todas las colecciones de la RD).</div>`;
   }
   if(rd&&rd.dense_strategy&&esPadre){
-    return `<div class="alert a-info mt8">🔑 Esta es la colección <b>padre</b> de la RD — ella fijó el embedding maestro: <b>${esc(rd.dense_strategy)}</b> / <b>${esc(rd.sparse_strategy||'bm25')}</b>. No se puede cambiar acá (afectaría la búsqueda de todas las colecciones de la RD).</div>`;
+    return `<div class="alert a-info mt8">🔑 Esta es la colección <b>padre</b> de la RD — ella fijó el embedding maestro: <b>${esc(rd.dense_strategy)}</b> / <b>${esc(rd.sparse_strategy||'bm25')}</b>, distancia <b>${esc(rd.distance||distance||'Cosine')}</b>. No se puede cambiar acá (afectaría la búsqueda de todas las colecciones de la RD).</div>`;
   }
   if(rd){
-    return `<div class="alert a-warn mt8">⚠️ La RD de esta colección todavía no tiene un embedding maestro fijado (colección creada antes de esta función). Si sabes con qué embedding se vectorizó, fíjalo acá para que quede como referencia de la RD.</div>
+    return `<div class="alert a-warn mt8">⚠️ La RD de esta colección todavía no tiene un embedding maestro fijado (colección creada antes de esta función). Si sabes con qué embedding se vectorizó, fíjalo acá para que quede como referencia de la RD. Distancia real de esta colección en Qdrant: <b>${esc(distance||'Cosine')}</b>.</div>
       <div class="fg"><label class="fl">Embedding denso</label><select class="fc" id="q-edit-dense-strategy"><option value="">Cargando…</option></select></div>
       <div class="fg"><label class="fl">Embedding disperso (sparse)</label>
         <select class="fc" id="q-edit-sparse-strategy"><option value="">bm25 — valor por defecto</option><option value="bm25">bm25</option><option value="bge_m3">bge_m3</option></select>
       </div>`;
   }
-  return `<div class="fh">Selecciona una RD para ver su embedding.</div>`;
+  return `<div class="fh">Colección normal (sin RD) — no comparte embedding con ninguna otra. Distancia real de esta colección en Qdrant: <b>${esc(distance||'Cosine')}</b>.</div>`;
 }
 
 let Q_EDIT_RD=null;
+let Q_EDIT_DISTANCE=null;
 
 function qEditTipoHTML(rd,courseId){
   if(!rd)return '<span class="tag t-new">📦 Normal</span> — sin RD, ningún asistente la encuentra.';
@@ -3328,8 +3453,9 @@ function qEditTipoHTML(rd,courseId){
   return '<span class="tag t-warn">🔑 Padre</span> — fija (o ya fijó) el embedding maestro de esta RD.';
 }
 
-function qEditRd(name,rdId,courseId){
+function qEditRd(name,rdId,courseId,distance){
   Q_EDIT_RD=Q_COLS_RDS.find(r=>r.id===rdId)||null;
+  Q_EDIT_DISTANCE=distance||null;
   showModal(`Editar colección — ${esc(name)}`,`
     <div class="fg"><label class="fl">Tipo de colección</label><div class="fh" id="q-edit-tipo">${qEditTipoHTML(Q_EDIT_RD,courseId)}</div></div>
     <div class="fg"><label class="fl">RD (aula)</label>
@@ -3340,7 +3466,7 @@ function qEditRd(name,rdId,courseId){
       <div class="fh">Cambiar la RD cambia el tipo: sin RD = normal, courseid igual al de la RD = padre, RD con embedding fijado y courseid distinto = hija.</div>
     </div>
     <div class="fg"><label class="fl">Course ID (Moodle)</label><input class="fc" type="number" id="q-edit-courseid" value="${courseId??''}" onchange="qEditRdOnChange()"></div>
-    <div class="fg"><label class="fl">Embedding</label><div id="q-edit-embedding-box">${qEditRdEmbeddingHTML(Q_EDIT_RD,courseId)}</div></div>
+    <div class="fg"><label class="fl">Embedding</label><div id="q-edit-embedding-box">${qEditRdEmbeddingHTML(Q_EDIT_RD,courseId,Q_EDIT_DISTANCE)}</div></div>
     <div class="modal-foot" style="margin-top:14px"><button class="btn btn-prim btn-sm" onclick='qEditRdSave(${JSON.stringify(name)})'>Guardar</button></div>
   `);
   if(Q_EDIT_RD&&!Q_EDIT_RD.dense_strategy)qEmbeddingFieldLoadOptions('q-edit');
@@ -3352,7 +3478,7 @@ async function qEditRdOnChange(){
   const courseId=courseIdEl&&courseIdEl.value?parseInt(courseIdEl.value):null;
   Q_EDIT_RD=val?Q_COLS_RDS.find(r=>r.id===parseInt(val)):null;
   $('q-edit-tipo').innerHTML=qEditTipoHTML(Q_EDIT_RD,courseId);
-  $('q-edit-embedding-box').innerHTML=val?qEditRdEmbeddingHTML(Q_EDIT_RD,courseId):'<div class="fh">Colección normal — sin embedding maestro de RD.</div>';
+  $('q-edit-embedding-box').innerHTML=val?qEditRdEmbeddingHTML(Q_EDIT_RD,courseId,Q_EDIT_DISTANCE):`<div class="fh">Colección normal — sin embedding maestro de RD. Distancia real de esta colección en Qdrant: <b>${esc(Q_EDIT_DISTANCE||'Cosine')}</b>.</div>`;
   if(Q_EDIT_RD&&!Q_EDIT_RD.dense_strategy)qEmbeddingFieldLoadOptions('q-edit');
 }
 
@@ -3429,15 +3555,47 @@ async function qViewDocs(name){
   try{
     const d=await api(`{{ URL_PREFIX }}/api/collections/${encodeURIComponent(name)}/documents`);
     const docs=d.documents||[];
-    $('q-docs-list').innerHTML=docs.map(doc=>`
-      <div class="di">
-        <div class="di-info">
-          <div class="di-name">${esc(doc.filename)}</div>
-          <div class="di-meta">${doc.chunks_count} chunks · ${esc(doc.source_type||'—')} · ${esc(doc.date||'')}</div>
-        </div>
-        <button class="btn btn-danger btn-sm" onclick='qDeleteDoc(${JSON.stringify(name)},${JSON.stringify(doc.filename)})'>Eliminar</button>
+    const grouped=groupDocsBySemana(docs);
+    $('q-docs-list').innerHTML=grouped.map(({label,docs})=>`
+      <div class="di-semgroup">
+        <div class="di-semhdr">${esc(label)} <span class="di-semcnt">${docs.length}</span></div>
+        ${docs.map(doc=>`
+          <div class="di">
+            <div class="di-info">
+              <div class="di-name">${esc(doc.filename)}</div>
+              <div class="di-meta">${doc.chunks_count} chunks · ${esc(doc.source_type||'—')} · ${esc(doc.date||'')}</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick='qViewChunks(${JSON.stringify(name)},${JSON.stringify(doc.filename)})'>Ver chunks</button>
+            <button class="btn btn-danger btn-sm" onclick='qDeleteDoc(${JSON.stringify(name)},${JSON.stringify(doc.filename)})'>Eliminar</button>
+          </div>`).join('')}
       </div>`).join('')||'<p class="muted">Sin documentos.</p>';
   }catch(e){$('q-docs-list').innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`}
+}
+
+async function qViewChunks(colName,filename){
+  showModalWide(`Chunks de ${esc(filename)}`,'<p class="muted">Cargando…</p>');
+  try{
+    const d=await api(`{{ URL_PREFIX }}/api/collections/${encodeURIComponent(colName)}/documents/${encodeURIComponent(filename)}/chunks`);
+    const chunks=d.chunks||[];
+    $('m-body').innerHTML=`<p class="muted" style="margin-bottom:10px">${d.total_chunks} chunk(s) — orden real de vectorización.</p>
+      <div class="chunk-list">${chunks.map(c=>{
+        const metaParts=[];
+        if(c.chunk!=null)metaParts.push(`#${c.chunk}`);
+        if(c.chunk_type)metaParts.push(esc(c.chunk_type));
+        if(c.page!=null)metaParts.push(`pág. ${c.page}`);
+        if(c.slide_number!=null)metaParts.push(`diapositiva ${c.slide_number}`);
+        if(c.start_time!=null)metaParts.push(`${c.start_time}${c.end_time!=null?'–'+c.end_time:''}`);
+        if(c.section_name)metaParts.push(esc(c.section_name));
+        return `
+        <div class="chunk-card">
+          <div class="chunk-meta">${metaParts.join(' · ')}</div>
+          ${c.contextual_header?`<div class="chunk-ctxhdr">${esc(c.contextual_header)}</div>`:''}
+          <div class="chunk-text">${esc(c.text||'(sin texto)')}</div>
+        </div>`;
+      }).join('')||'<p class="muted">Sin chunks.</p>'}</div>`;
+  }catch(e){
+    $('m-body').innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`;
+  }
 }
 
 function qDeleteDoc(colName,filename){

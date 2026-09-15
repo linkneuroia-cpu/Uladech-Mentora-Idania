@@ -19,6 +19,7 @@ cambios.
 """
 
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from settings import settings
@@ -131,6 +132,26 @@ def _build_pipeline_config(
         sparse_strategy=rd.get("sparse_strategy") or active["sparse"],
         source_type=source_type or DEFAULT_SOURCE_TYPE,
     )
+
+
+def _sync_structured_index(collection_name: str, pipeline_config: Optional[PipelineConfig]) -> None:
+    """Se llama al terminar cada job de vectorización (los 3 mecanismos:
+    Semiautomático/Automático/Actualización) — retag de tablas plantilla
+    con visión de la colección completa + reconstrucción del Índice de
+    Campos Estructurados (ver campos_estructurados.sync_after_vectorization).
+    Solo aplica a colecciones híbridas (pipeline_config is None = legacy,
+    sin chunk_type/tablas estructuradas — no hay nada que sincronizar).
+    No fatal: si falla, el job de vectorización ya se completó igual y el
+    índice simplemente queda desactualizado hasta el próximo job o una
+    reconstrucción manual — nunca bloquea ni revierte la vectorización."""
+    if pipeline_config is None:
+        return
+    try:
+        import campos_estructurados as ce
+        summary = ce.sync_after_vectorization(collection_name)
+        print(f"✓ Índice estructurado sincronizado en '{collection_name}': {summary}")
+    except Exception as e:
+        print(f"⚠️ No se pudo sincronizar el índice estructurado de '{collection_name}' (se ignora): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -306,6 +327,7 @@ class SemiAutoCore:
             finally:
                 cleanup_temp_file(file_path)
 
+        _sync_structured_index(collection_name, pipeline_config)
         _complete_job(job_id, {
             "vectors_stored":  sum(r.get("vectors_stored", 0) for r in results),
             "embedding_model": model_name,
@@ -342,24 +364,51 @@ class AutoCore:
 
         modules = []
         for resource in resources:
-            module_name = resource.get("name", "Sin nombre")
+            # resource["name"] es el título del recurso/actividad individual
+            # de Moodle (ej. "Sesión de aprendizaje 5") — NO la semana.
+            # resource["section_name"] es la sección/semana real (ej.
+            # "Semana 05 : Fundamentos básicos..."), la misma que
+            # download_and_validate() ya usa para el section_name que
+            # termina en el payload vectorizado (ver definitions.py
+            # get_course_resources). "module_name" acá se usa para AGRUPAR
+            # la vista previa — debe ser la semana real, no el recurso
+            # individual, para que varios recursos de la misma semana
+            # (sesión + lectura + actividad...) queden bajo un solo grupo
+            # en vez de uno por recurso.
+            resource_name = resource.get("name", "Sin nombre")
+            week_label = resource.get("section_name") or resource_name
             files = []
             for cf in resource.get("contentfiles", []):
                 filename = cf["filename"]
                 dup = service.check_duplicate(filename, collection_name)
+                # timemodified: fecha real en que el archivo se subió/editó
+                # en Moodle (epoch Unix) — distinta de existing_date (fecha
+                # en que SE VECTORIZÓ). Se muestran ambas una al lado de la
+                # otra en el gestor para distinguir "cuándo lo subió el
+                # docente" de "cuándo lo procesó el sistema".
+                upload_date = None
+                tm = cf.get("timemodified")
+                if tm:
+                    try:
+                        upload_date = datetime.fromtimestamp(int(tm), tz=timezone.utc).strftime("%Y-%m-%d")
+                    except (ValueError, OSError, OverflowError):
+                        upload_date = None
                 files.append(DocumentInfo(
                     filename=filename,
                     filesize=cf.get("filesize"),
                     fileurl=cf.get("fileurl"),
-                    course_name=module_name,
+                    course_name=resource_name,
                     file_type=classify_file_type(filename),
                     is_duplicate=dup["exists"],
                     existing_chunks=dup["total_chunks"],
+                    existing_date=dup.get("date"),
+                    existing_source_type=dup.get("source_type"),
+                    moodle_upload_date=upload_date,
                 ).dict())
 
             if files:
                 modules.append({
-                    "module_name": module_name,
+                    "module_name": week_label,
                     "resource_id": resource.get("id"),
                     "files": files,
                 })
@@ -622,6 +671,7 @@ class AutoCore:
             finally:
                 cleanup_temp_file(file_path)
 
+        _sync_structured_index(collection_name, base_pipeline_config)
         _complete_job(job_id, {
             "vectors_stored":  sum(r.get("vectors_stored", 0) for r in results),
             "embedding_model": model_name,
@@ -858,6 +908,7 @@ class UpdateCore:
                 pipeline_config=pipeline_config,
                 pretranscribed_segments=fd.get("pretranscribed_segments"),
             )
+            _sync_structured_index(collection_name, pipeline_config)
             _complete_job(job_id, {**result, "embedding_model": model_name})
 
         except Exception as e:

@@ -360,6 +360,97 @@ class QdrantAdminManager:
             "message": f"Eliminados {total_points} chunks del documento '{filename}'",
         }
 
+    def set_document_source_type(
+        self,
+        collection_name: str,
+        filename: str,
+        source_type: str,
+    ) -> Dict[str, Any]:
+        """Actualiza el campo source_type (curso_propio/bibliografia) de
+        TODOS los puntos (chunks) de un documento ya vectorizado — permite
+        recategorizar un archivo sin tener que re-vectorizarlo. Mismo
+        criterio de identificación por filename que delete_document_by_filename."""
+        if not self.collection_exists(collection_name):
+            raise ValueError(f"La colección '{collection_name}' no existe")
+        if source_type not in ("curso_propio", "bibliografia"):
+            raise ValueError("source_type debe ser 'curso_propio' o 'bibliografia'")
+
+        flt = Filter(must=[FieldCondition(key="filename", match=MatchValue(value=filename))])
+        scroll_result = self._client.scroll(
+            collection_name=collection_name, scroll_filter=flt,
+            limit=10000, with_payload=False, with_vectors=False,
+        )
+        total_points = len(scroll_result[0])
+        if total_points == 0:
+            raise ValueError(
+                f"No se encontraron puntos con filename='{filename}' en la colección '{collection_name}'"
+            )
+
+        self._client.set_payload(
+            collection_name=collection_name,
+            payload={"source_type": source_type},
+            points=flt,
+        )
+
+        return {
+            "success": True,
+            "collection_name": collection_name,
+            "filename": filename,
+            "source_type": source_type,
+            "updated_points": total_points,
+        }
+
+    def get_document_chunks(self, collection_name: str, filename: str) -> Dict[str, Any]:
+        """Todos los chunks de UN documento, con su texto y metadata
+        completa — para inspección/detalle (a diferencia de
+        list_documents_in_collection, que solo agrega un resumen por
+        documento). Ordenados por índice de chunk cuando existe."""
+        if not self.collection_exists(collection_name):
+            raise ValueError(f"La colección '{collection_name}' no existe")
+
+        all_points = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=collection_name,
+                limit=200,
+                offset=offset,
+                scroll_filter=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=filename))]),
+                with_payload=True,
+                with_vectors=False,
+            )
+            all_points.extend(points)
+            if offset is None:
+                break
+
+        if not all_points:
+            raise ValueError(f"No se encontraron chunks de '{filename}' en la colección '{collection_name}'")
+
+        chunks = []
+        for point in all_points:
+            payload = point.payload or {}
+            chunks.append({
+                "id": str(point.id),
+                "chunk": payload.get("chunk"),
+                "chunk_type": payload.get("chunk_type"),
+                "text": payload.get("text"),
+                "contextual_header": payload.get("contextual_header"),
+                "page": payload.get("page"),
+                "section_name": payload.get("section_name"),
+                "source_type": payload.get("source_type"),
+                "slide_number": payload.get("slide_number"),
+                "start_time": payload.get("start_time"),
+                "end_time": payload.get("end_time"),
+            })
+        chunks.sort(key=lambda c: (c["chunk"] if c["chunk"] is not None else 0))
+
+        return {
+            "collection_name": collection_name,
+            "filename": filename,
+            "total_chunks": len(chunks),
+            "chunks": chunks,
+        }
+
     def list_documents_in_collection(self, collection_name: str) -> Dict[str, Any]:
         """Lista todos los documentos únicos en una colección, agrupados por
         filename, con información de chunks."""
@@ -397,6 +488,7 @@ class QdrantAdminManager:
                     "total_chunks": payload.get("total_chunks"),
                     "date": payload.get("date"),
                     "source_type": payload.get("source_type"),
+                    "section_name": payload.get("section_name"),
                     "chunks_count": 0,
                 }
 

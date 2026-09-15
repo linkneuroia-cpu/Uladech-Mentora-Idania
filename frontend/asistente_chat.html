@@ -33,8 +33,20 @@ body{
 .hist-btn:hover{background:var(--neutral-100)}
 .act-counter{font-size:11px;color:var(--gray-500);font-weight:600;flex-shrink:0;padding:4px 9px;border-radius:99px;background:var(--neutral-100)}
 .act-counter.limit{color:var(--red-700);background:var(--red-200)}
-.msg.assistant.reencuentro{background:var(--neutral-100);border-style:dashed}
 .wrap{flex:1;display:flex;flex-direction:column;max-width:1400px;width:100%;margin:0 auto;padding:16px;min-height:0}
+
+/* Presentación fija del asistente (saludo/reencuentro) — a propósito NO
+   es una burbuja de .msg ni vive dentro de #chat: no debe leerse como "un
+   turno más" de la conversación (como en ChatGPT/Claude/Gemini, donde el
+   saludo inicial se mezcla con el resto del historial), sino como un
+   encabezado de presentación que se ve una sola vez. */
+.chat-intro{padding:14px 16px;margin-bottom:10px;border-radius:var(--radius-lg);
+  background:linear-gradient(135deg,var(--blue-400),var(--blue-200));
+  border:1px solid var(--neutral-300);font-size:14px;line-height:1.55}
+.chat-intro-saludo{color:var(--gray-800)}
+.chat-intro-reencuentro{margin-top:8px;padding-top:8px;border-top:1px dashed var(--neutral-300);
+  color:var(--gray-600);font-size:13px;font-style:italic}
+.chat-intro[hidden]{display:none}
 
 /* ── Sidebar de historial: overlay off-canvas en cualquier ancho,
    abierta/cerrada con el botón "Historial" del header ── */
@@ -212,18 +224,15 @@ body{
   <div class="logo-circle"><img src="{{ URL_PREFIX }}/img/uladechcatolica-logo-purple-300x213.webp" alt="Logo ULADECH Católica"></div>
   <div class="hdr-txt" style="flex:1">
     <div class="ent">ULADECH Católica</div>
-    <div class="sys">{{ asistente_nombre }}</div>
   </div>
   <div class="act-counter" id="act-counter" title="Preguntas usadas en esta conversación">{{ preguntas_usadas }}/{{ max_actividades_sesion }}</div>
 </header>
 <div class="wrap">
+  <div class="chat-intro" id="chat-intro">
+    <div class="chat-intro-saludo" id="chat-intro-saludo"></div>
+    <div class="chat-intro-reencuentro" id="chat-intro-reencuentro" hidden></div>
+  </div>
   <div class="chat" id="chat">
-    {% if not historial %}
-    <div class="msg assistant">{% if saludo_nombre %}Hola {{ saludo_nombre }}, {% else %}Hola, {% endif %}{% if mensaje_bienvenida %}{{ mensaje_bienvenida }}{% else %}soy <strong>{{ asistente_nombre }}</strong>. Pregúntame lo que necesites sobre el curso.{% endif %}</div>
-    {% endif %}
-    {% if reencuentro %}
-    <div class="msg assistant reencuentro">{{ reencuentro }}</div>
-    {% endif %}
   </div>
   <div class="inputbar">
     <textarea id="q" rows="1" placeholder="Escribe tu pregunta…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();enviar();}"></textarea>
@@ -238,6 +247,8 @@ let SESION_ID = {{ sesion_id|tojson }};
 const COURSEID = {{ courseid|tojson }};
 const USERID = {{ userid|tojson }};
 const HISTORIAL = {{ historial|tojson }};
+const SALUDO_INICIAL = {{ saludo|tojson }};
+const REENCUENTRO_INICIAL = {{ reencuentro|tojson }};
 const MAX_ACTIVIDADES_SESION = {{ max_actividades_sesion|tojson }};
 const PREGUNTAS_USADAS = {{ preguntas_usadas|tojson }};
 const chat = document.getElementById('chat');
@@ -401,6 +412,18 @@ function renderMath(el){
   }
 }
 
+// Actualiza el bloque fijo de presentación (#chat-intro) — usado al crear
+// una conversación nueva o al abrir una anterior desde la sidebar, en vez
+// de agregar el saludo como una burbuja más de #chat (ver chat-intro en
+// el CSS: es a propósito una presentación fija, no "un turno más").
+function setIntro(saludoText, reencuentroText){
+  const s=document.getElementById('chat-intro-saludo');
+  const r=document.getElementById('chat-intro-reencuentro');
+  if(saludoText!=null){s.innerHTML=mdToHtml(saludoText);}
+  if(reencuentroText){r.innerHTML=mdToHtml(reencuentroText);r.hidden=false;}
+  else{r.hidden=true;r.innerHTML='';}
+}
+
 function addMsg(role, text){
   const div = document.createElement('div');
   div.className = 'msg ' + role;
@@ -424,6 +447,9 @@ function addMsg(role, text){
   addMsg(m.rol, m.contenido);
   if(m.rol === 'assistant') addRating(m.id, m.calificacion);
 });
+// El saludo/reencuentro fijo (#chat-intro) también pasa por mdToHtml() acá
+// — antes se renderizaba crudo desde Jinja (auto-escapado, sin negrita).
+setIntro(SALUDO_INICIAL, REENCUENTRO_INICIAL);
 
 function addSources(sources){
   if(!sources || !sources.length) return;
@@ -568,7 +594,7 @@ async function nuevaConversacion(){
     if(!r.ok) throw new Error(j.detail || 'No se pudo crear la conversación');
     SESION_ID = j.sesion_id;
     chat.innerHTML = '';
-    addMsg('assistant', j.saludo);
+    setIntro(j.saludo, null);
     toggleSidebar(false);
     q.disabled = false;
     updateActCounter(0, MAX_ACTIVIDADES_SESION);
@@ -709,6 +735,7 @@ async function abrirConversacion(sesionId){
     if(!r.ok) throw new Error(j.detail || 'No se pudo abrir esa conversación');
     SESION_ID = sesionId;
     chat.innerHTML = '';
+    if(j.saludo) setIntro(j.saludo, null);
     (j.historial || []).forEach(m => {
       addMsg(m.rol, m.contenido);
       if(m.rol === 'assistant') addRating(m.id, m.calificacion);

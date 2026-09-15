@@ -7,14 +7,18 @@ construcción del prompt → generación con el tutor. Usado por los
 endpoints `/api/rag/*` en app.py y por la sección "Pruebas del LLM".
 """
 import asyncio
+import re
 import time
+import unicodedata
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from qdrant_admin import get_qdrant_admin
 from settings import settings
 from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
-from strategies.rerank import apply_source_boost, apply_week_boost
+from strategies.rerank import apply_source_boost, apply_week_boost, _extract_all_week_numbers
+import campos_estructurados
 
 # `rerank_score` es la probabilidad de relevancia del cross-encoder (0-1,
 # sigmoid ya aplicado por BGE/Cohere) ANTES del boost de curso_propio.
@@ -37,6 +41,7 @@ async def hybrid_retrieve(
     dense_strategy_name: Optional[str] = None,
     sparse_strategy_name: Optional[str] = None,
     top_k: Optional[int] = None,
+    prefetch_limit: Optional[int] = None,
     timings: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """Embebe la consulta con las estrategias dense+sparse activas y
@@ -72,6 +77,7 @@ async def hybrid_retrieve(
             sparse_indices=sparse_vector["indices"],
             sparse_values=sparse_vector["values"],
             limit=top_k or settings.RERANK_TOP_K,
+            **({"prefetch_limit": prefetch_limit} if prefetch_limit else {}),
         ),
     )
     if timings is not None:
@@ -102,13 +108,38 @@ async def retrieve_rerank_boost(
     """hybrid_retrieve() -> reranker.rerank() sobre todo el pool recuperado
     -> apply_source_boost() (prioriza curso_propio) -> apply_week_boost()
     (prioriza coincidencia exacta de semana/sesión si la pregunta menciona
-    una) -> top_n final."""
+    una) -> top_n final.
+
+    Preguntas de dato puntual de tabla (docente, créditos, modalidad...) ya
+    no dependen de que el chunk correcto entre a este pool de similitud —
+    se resuelven antes, en answer_query(), vía el Índice de Campos
+    Estructurados (campos_estructurados.py), que se inyecta como evidencia
+    directa sin pasar por retrieval/reranking. El router de palabras clave
+    que existía acá (Fase 3.7, _METADATA_FIELD_PATTERNS) fue retirado tras
+    comprobar que el índice iguala sus métricas con 0 reglas curadas — ver
+    informe en Data prueba/.
+
+    Preguntas que mencionan 2+ semanas/sesiones distintas ("compara la
+    semana 9 con la semana 10") piden un pool más profundo desde el
+    principio: apply_week_boost() ya boostea candidatos de CUALQUIERA de
+    las semanas mencionadas, pero eso solo ayuda si esos candidatos llegan
+    a estar en el pool — con el top_k por defecto, a veces solo una de las
+    2 semanas entra. Señal 100% genérica (cuenta de números de semana en
+    la pregunta, ver strategies.rerank._extract_all_week_numbers), no
+    depende de ningún curso/tema puntual."""
+    effective_top_k = top_k
+    effective_prefetch_limit = None
+    if effective_top_k is None and len(_extract_all_week_numbers(query)) >= 2:
+        effective_top_k = max(settings.RERANK_TOP_K, 150)
+        effective_prefetch_limit = 300
+
     candidates = await hybrid_retrieve(
         collection_name=collection_name,
         query=query,
         dense_strategy_name=dense_strategy_name,
         sparse_strategy_name=sparse_strategy_name,
-        top_k=top_k,
+        top_k=effective_top_k,
+        prefetch_limit=effective_prefetch_limit,
         timings=timings,
     )
     if not candidates:
@@ -124,14 +155,150 @@ async def retrieve_rerank_boost(
     # boost de semana/sesión necesita ver el pool completo, no solo lo que
     # ya haya sobrevivido al corte de curso_propio/bibliografía.
     boosted = apply_source_boost(reranked, settings.RERANK_BOOST_MULTIPLIER, top_n=len(reranked))
-    final = apply_week_boost(boosted, query)
-    return final[:n]
+    week_boosted = apply_week_boost(boosted, query)
+    return week_boosted[:n]
 
 
-def build_generation_prompt(query: str, candidates: List[Dict[str, Any]]) -> str:
+# Verificación de fuente solicitada por nombre — genérica, no hardcodea
+# ningún documento concreto. Detecta cuando la pregunta nombra un TIPO de
+# documento (reglamento, manual, sílabo, artículo, norma, guía, ley,
+# informe, libro, cuadro, tabla, registro, resolución, decreto, protocolo,
+# diccionario, glosario, documento o archivo) y compara ese nombre contra
+# el `filename` REAL de cada candidato recuperado — un dato de metadata
+# objetivo, no una decisión del LLM. Nace del caso real reproducido: le
+# preguntaron por "el reglamento de investigación" (que no existe en el
+# curso) y el modelo tomó esa frase de la propia pregunta y la pegó sobre
+# contenido real pero de OTRO documento (TESIS.pdf) como si lo describiera.
+_DOC_TYPE_WORDS = (
+    "reglamento", "manual", "s[ií]labo", "art[ií]culo", "norma(?:\\s+t[ée]cnica)?",
+    "gu[ií]a", "ley", "informe", "libro", "cuadro", "tabla", "registro", "acta",
+    "resoluci[oó]n", "decreto", "protocolo", "documento", "archivo",
+    "diccionario", "glosario",
+)
+_DOC_REFERENCE_RE = re.compile(
+    r"\b(?:el|la|los|las|del|de la)\s+(" + "|".join(_DOC_TYPE_WORDS) + r")\b"
+    r"(?:\s+(?:de|del|de la|sobre))?\s*([a-záéíóúñ0-9][^?.,;:]{2,60})?",
+    re.IGNORECASE,
+)
+# Mención literal de un archivo por nombre (ej. "TESIS.pdf", "el archivo
+# Norma-Tecnica-del-Odontograma.pdf") — más específica y confiable que el
+# patrón de arriba cuando existe. Se ancla a lo sumo 4 palabras antes de la
+# extensión (no toda la oración); las palabras de relleno (interrogativos,
+# verbos, "archivo"/"documento") se recortan después con
+# _FILLER_PREFIX_WORDS para no diluir el match contra el filename real.
+_FILENAME_MENTION_RE = re.compile(
+    r"(?:[\w\-]+[ ]){0,4}[\w\-]+\.(?:pdf|docx?|pptx?|xlsx?|txt|csv)\b", re.IGNORECASE
+)
+_STOPWORDS_MATCH = {
+    "de", "del", "la", "el", "los", "las", "que", "sobre", "con", "para",
+    "en", "y", "o", "un", "una", "curso", "este", "esta", "ese", "esa",
+}
+_FILLER_PREFIX_WORDS = {
+    "que", "cual", "cuales", "quien", "dime", "dame", "muestrame", "dice",
+    "decir", "archivo", "documento", "el", "la", "los", "las", "un", "una",
+    "del", "de",
+}
+
+
+def _strip_filler_prefix(text: str) -> str:
+    """Recorta palabras de relleno al INICIO de una mención de archivo
+    (ej. "Qué dice el archivo TESIS.pdf" -> "TESIS.pdf") sin tocar el
+    resto — un filename real puede tener espacios propios (ej. "SILABO
+    INTRODUCCIÓN A LA ODONTOLOGÍA.pdf"), así que solo se recorta el
+    prefijo, nunca el interior."""
+    words = text.split()
+    while len(words) > 1:
+        normalized = unicodedata.normalize("NFKD", words[0]).encode("ascii", "ignore").decode().lower()
+        if normalized in _FILLER_PREFIX_WORDS:
+            words.pop(0)
+        else:
+            break
+    return " ".join(words)
+
+
+def _extract_document_reference(query: str) -> Optional[str]:
+    """Si la pregunta nombra explícitamente un documento/reglamento/manual/
+    archivo puntual, devuelve ese nombre tal como lo escribió el
+    estudiante. None si la pregunta no referencia ninguna fuente puntual
+    (la inmensa mayoría de las preguntas — esta función no debe alterar su
+    comportamiento en absoluto)."""
+    m = _FILENAME_MENTION_RE.search(query)
+    if m:
+        return _strip_filler_prefix(m.group(0).strip())
+    m = _DOC_REFERENCE_RE.search(query)
+    if m:
+        doc_type = m.group(1)
+        topic = (m.group(2) or "").strip()
+        return f"{doc_type} {topic}".strip()
+    return None
+
+
+_EXTENSION_RE = re.compile(r"\.(?:pdf|docx?|pptx?|xlsx?|txt|csv)\b", re.IGNORECASE)
+
+
+def _tokenize_for_match(text: str) -> set:
+    # Se quita la extensión ANTES de tokenizar — si no, "TESIS.pdf" aporta
+    # el token "pdf" del lado de la referencia pero no del lado del
+    # filename real (Path.stem ya se la sacó), diluyendo el match para
+    # nombres de un solo término.
+    without_ext = _EXTENSION_RE.sub("", text or "")
+    normalized = unicodedata.normalize("NFKD", without_ext).encode("ascii", "ignore").decode()
+    words = re.findall(r"[a-z0-9]+", normalized.lower())
+    return {w for w in words if w not in _STOPWORDS_MATCH and len(w) > 2}
+
+
+def _filename_matches_reference(filename: str, reference: str) -> bool:
+    """True si el `filename` REAL de un chunk coincide razonablemente con
+    lo que el estudiante nombró — comparación léxica sobre metadata
+    (nunca semántica/por tema), tolerante a que falte alguna palabra
+    (typos reales vistos en nombres de archivo de Moodle) pero exige que
+    la MAYORÍA de las palabras con contenido de la referencia aparezcan en
+    el nombre real del archivo."""
+    ref_tokens = _tokenize_for_match(reference)
+    if not ref_tokens:
+        return False
+    fname_tokens = _tokenize_for_match(Path(filename or "").stem)
+    overlap = ref_tokens & fname_tokens
+    return len(overlap) >= max(1, -(-len(ref_tokens) * 6 // 10))  # ceil(60%)
+
+
+def annotate_source_match(
+    candidates: List[Dict[str, Any]], reference: Optional[str]
+) -> bool:
+    """Marca en cada candidato (`c["source_match"]`) si su archivo real
+    coincide con la fuente que el estudiante pidió por nombre. No filtra
+    ni reordena nada — solo etiqueta, para que build_generation_prompt()
+    pueda mostrarle al LLM cuáles fragmentos SÍ son la fuente pedida y
+    cuáles son de un documento distinto. Devuelve True si al menos un
+    candidato coincide."""
+    if reference is None:
+        for c in candidates:
+            c["source_match"] = None
+        return False
+    found = False
+    for c in candidates:
+        matches = _filename_matches_reference(c.get("payload", {}).get("filename") or "", reference)
+        c["source_match"] = matches
+        found = found or matches
+    return found
+
+
+def build_generation_prompt(
+    query: str,
+    candidates: List[Dict[str, Any]],
+    document_reference: Optional[str] = None,
+    requested_source_found: Optional[bool] = None,
+) -> str:
     """Agrupa los candidatos recuperados en bloques [MATERIAL DEL CURSO] /
     [BIBLIOGRAFÍA COMPLEMENTARIA] con citas (filename, diapositiva/minuto/
-    fragmento), seguidos de la pregunta del estudiante."""
+    fragmento), seguidos de la pregunta del estudiante.
+
+    Si `document_reference` no es None (el estudiante nombró una fuente
+    puntual — ver `_extract_document_reference`), antepone una línea de
+    estado objetiva (encontrada o no, según metadata real) y marca cada
+    fragmento que NO pertenece a esa fuente como "[FUENTE DISTINTA A LA
+    SOLICITADA]" para que el modelo nunca lo presente como si fuera el
+    documento pedido."""
     curso_blocks: List[str] = []
     biblio_blocks: List[str] = []
 
@@ -153,7 +320,12 @@ def build_generation_prompt(query: str, candidates: List[Dict[str, Any]]) -> str
 
         header = payload.get("contextual_header") or ""
         text = payload.get("text") or c.get("text", "")
-        block = f"[Fuente: {citation}]\n{(header + chr(10)) if header else ''}{text}"
+        mismatch_tag = (
+            "[FUENTE DISTINTA A LA SOLICITADA] "
+            if document_reference is not None and c.get("source_match") is False
+            else ""
+        )
+        block = f"{mismatch_tag}[Fuente: {citation}]\n{(header + chr(10)) if header else ''}{text}"
 
         if payload.get("source_type") == "bibliografia":
             biblio_blocks.append(block)
@@ -161,6 +333,13 @@ def build_generation_prompt(query: str, candidates: List[Dict[str, Any]]) -> str
             curso_blocks.append(block)
 
     parts = []
+    if document_reference is not None:
+        estado = "SÍ" if requested_source_found else "NO"
+        parts.append(
+            f"[VERIFICACIÓN DE FUENTE SOLICITADA] El estudiante pidió específicamente: "
+            f"\"{document_reference}\". ¿Se encontró un documento real con ese nombre entre "
+            f"las fuentes recuperadas? {estado}."
+        )
     if curso_blocks:
         parts.append("[MATERIAL DEL CURSO]\n" + "\n\n".join(curso_blocks))
     if biblio_blocks:
@@ -168,6 +347,61 @@ def build_generation_prompt(query: str, candidates: List[Dict[str, Any]]) -> str
     context_block = "\n\n".join(parts) if parts else "(sin fragmentos recuperados)"
 
     return f"{context_block}\n\nPregunta del estudiante: {query}"
+
+
+def _build_structured_evidence_candidate(structured: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Convierte el resultado de campos_estructurados.structured_lookup()
+    en un candidato con la MISMA forma que produce hybrid_retrieve() (para
+    que build_generation_prompt()/apply_source_boost() lo traten igual que
+    cualquier otro), o None si no hay evidencia estructurada utilizable
+    (status 'insufficient'/'not_found' -> el RAG normal sigue intacto).
+
+    'ambiguous': NO se elige un valor — se arma un bloque que muestra
+    explícitamente los valores distintos encontrados y su fuente, para que
+    el LLM explique la discrepancia o se abstenga, nunca que adivine cuál
+    es el correcto (ver informe, sección "resolución de conflictos")."""
+    if structured is None:
+        return None
+    status = structured.get("status")
+
+    if status == "confident":
+        ev = structured["evidence"][0]
+        field_raw = ev.get("field_raw") or structured.get("field", "")
+        text = f"{field_raw}: {ev['value_raw']}" if field_raw else str(ev["value_raw"])
+        filename, page, section = ev["document_filename"], ev.get("page"), ev.get("section_heading")
+        source_type = ev.get("source_type") or "curso_propio"
+    elif status == "confident_row":
+        ev_list = structured["evidence"]
+        first = ev_list[0]
+        text = " | ".join(f"{e['field_raw']}: {e['value_raw']}" for e in ev_list if e.get("value_raw"))
+        filename, page, section = first["document_filename"], first.get("page"), first.get("section_heading")
+        source_type = first.get("source_type") or "curso_propio"
+    elif status == "ambiguous":
+        lines = ["[ADVERTENCIA: valores DISTINTOS encontrados para este dato en documentos diferentes del curso — no elijas uno, explicá la discrepancia o pedí precisión]"]
+        for cand in structured["candidates"]:
+            ev = cand["evidence"][0]
+            lines.append(f"- En {ev['document_filename']}: {cand['value']}")
+        text = "\n".join(lines)
+        filename, page, section = "(múltiples documentos, ver detalle abajo)", None, None
+        source_type = "curso_propio"
+    else:  # "insufficient" / "not_found"
+        return None
+
+    return {
+        "payload": {
+            "filename": filename,
+            "source_type": source_type,
+            "section_name": section,
+            "chunk": None,
+            "slide_number": None,
+            "start_time": None,
+            "text": text,
+            "contextual_header": "[Evidencia estructurada — dato extraído directamente de una tabla del curso]",
+        },
+        "score": 1.0,
+        "rerank_score": 1.0,
+        "boosted_score": 10_000.0,  # por encima de cualquier boost normal — es evidencia exacta, no una similitud
+    }
 
 
 async def answer_query(
@@ -182,13 +416,21 @@ async def answer_query(
     extra_system_prompt: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    """Pipeline completo: retrieve_rerank_boost() -> build_generation_prompt()
-    -> generation_strategy.generate(SYSTEM_PROMPT_TEMPLATE [+ extra_system_prompt
-    del asistente, si lo hay], user_prompt, history). `extra_system_prompt` se
-    AGREGA al prompt fijo, nunca lo reemplaza — así la regla de prioridad
+    """Pipeline completo: retrieve_rerank_boost() [Qdrant hybrid + rerank +
+    boosts] + campos_estructurados.structured_lookup() [evidencia de tabla
+    de alta precisión, si la colección tiene índice] -> evidencia
+    consolidada -> build_generation_prompt() -> Evidence/Answerability Gate
+    (filtro MIN_SOURCE_RELEVANCE + abstención) -> generation_strategy.generate()
+    -> validación de grounding/fuente. `extra_system_prompt` se AGREGA al
+    prompt fijo, nunca lo reemplaza — así la regla de prioridad
     curso_propio/bibliografía siempre se respeta. `history`: turnos previos
     de la conversación (ver assistants.get_recent_history), para que el
-    tutor recuerde lo ya preguntado en la misma sesión."""
+    tutor recuerde lo ya preguntado en la misma sesión.
+
+    El índice de campos estructurados es una fuente de evidencia adicional,
+    no un asistente aparte: se consulta siempre (si la colección no tiene
+    índice poblado, structured_lookup() devuelve None sin error y el
+    pipeline sigue igual que antes de que existiera)."""
     t_total = time.perf_counter()
     timings: Dict[str, float] = {}
     candidates = await retrieve_rerank_boost(
@@ -209,7 +451,37 @@ async def answer_query(
     # hacer en ese caso.
     candidates = [c for c in candidates if c.get("rerank_score", 1.0) >= MIN_SOURCE_RELEVANCE]
 
-    user_prompt = build_generation_prompt(query, candidates)
+    # Índice de campos estructurados: si la pregunta apunta a un campo real
+    # de esta colección (descubierto de los datos, no de una lista fija —
+    # ver campos_estructurados.py), se inyecta como evidencia de alta
+    # confianza en el MISMO pool que compite/se cita junto con lo
+    # recuperado por Qdrant — no es una respuesta aparte. Ambiguo -> se
+    # preserva la contradicción explícitamente, nunca se elige un valor por
+    # mayoría. Insuficiente/no encontrado/colección sin índice -> no se
+    # toca nada, sigue el RAG normal sin este paso (siempre seguro: si la
+    # colección no tiene índice poblado en Postgres, structured_lookup()
+    # devuelve None de inmediato, sin excepción).
+    t0 = time.perf_counter()
+    try:
+        structured = await campos_estructurados.structured_lookup(
+            collection_name, query, dense_strategy_name=dense_strategy_name)
+    except Exception as e:
+        print(f"⚠️ structured_lookup falló (se ignora, sigue el RAG normal): {e}")
+        structured = None
+    timings["structured_lookup_ms"] = (time.perf_counter() - t0) * 1000
+    synthetic = _build_structured_evidence_candidate(structured)
+    if synthetic is not None:
+        candidates.insert(0, synthetic)
+
+    # Si el estudiante nombró una fuente puntual (reglamento/manual/sílabo/
+    # archivo/...), se verifica por metadata real (filename) cuáles
+    # candidatos son efectivamente esa fuente — ver annotate_source_match().
+    document_reference = _extract_document_reference(query)
+    requested_source_found = annotate_source_match(candidates, document_reference)
+
+    user_prompt = build_generation_prompt(
+        query, candidates, document_reference, requested_source_found
+    )
     system_prompt = SYSTEM_PROMPT_TEMPLATE
     if extra_system_prompt:
         system_prompt = f"{SYSTEM_PROMPT_TEMPLATE}\n\nContexto adicional de este asistente:\n{extra_system_prompt}"
