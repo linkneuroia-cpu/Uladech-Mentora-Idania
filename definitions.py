@@ -405,6 +405,33 @@ def _find_formula_regions(
 
 _latex_ocr_model = None
 
+# pix2tex es un modelo generativo sin mecanismo de rechazo propio: ante
+# una región que NO es una fórmula real (una tabla sin líneas completas,
+# un diagrama, un logo), en vez de fallar devuelve LaTeX con apariencia
+# válida pero sin sentido — confirmado con datos reales de ambos cursos
+# (ver evaluación de vectorización): tokens "scriptstyle"/"mathrm"
+# repetidos decenas de veces, y un artefacto propio del modelo, el token
+# literal "[object Object]", insertado como si fuera un argumento LaTeX
+# real. Una fórmula real de material de curso (ej. interés compuesto:
+# "P(1+\\frac{r}{n})^{nt}") es corta — estos falsos positivos midieron
+# cientos a miles de caracteres. Genérico: no depende de qué documento es,
+# solo de si el LaTeX generado es estructuralmente plausible.
+_MAX_PLAUSIBLE_FORMULA_CHARS = 300
+_MAX_TOKEN_REPETITIONS = 6
+
+
+def _looks_like_plausible_formula(latex: str) -> bool:
+    if not latex or len(latex) > _MAX_PLAUSIBLE_FORMULA_CHARS:
+        return False
+    if "object Object" in latex:
+        return False
+    token_counts: Dict[str, int] = {}
+    for token in re.findall(r"[a-zA-Z]{4,}", latex):
+        token_counts[token] = token_counts.get(token, 0) + 1
+        if token_counts[token] > _MAX_TOKEN_REPETITIONS:
+            return False
+    return True
+
 
 def _get_latex_ocr():
     """LaTeX-OCR (pix2tex): modelo especializado en imagen-de-fórmula ->
@@ -471,8 +498,11 @@ async def _ocr_page_region(fitz_page, bbox: Tuple[float, float, float, float]) -
             latex_model = await loop.run_in_executor(None, _get_latex_ocr)
             img = Image.open(tmp_path)
             latex = await loop.run_in_executor(None, lambda: latex_model(img))
-            if latex and latex.strip():
-                return f"\\( {latex.strip()} \\)"
+            latex = (latex or "").strip()
+            if latex and _looks_like_plausible_formula(latex):
+                return f"\\( {latex} \\)"
+            if latex:
+                print(f"⚠️ pix2tex devolvió LaTeX no plausible (descartado), cae a EasyOCR: {latex[:120]}...")
         except Exception as e:
             print(f"⚠️ pix2tex falló, cae a EasyOCR: {e}")
 
@@ -1132,14 +1162,26 @@ def chunk_structured_blocks(
                 row_text = " | ".join(f"{k}: {v}" if k else v for k, v in row.items())
                 if not row_text.strip():
                     continue
-                chunks.append({
-                    "chunk": len(chunks),
-                    "text": row_text,
-                    "urls": None,
-                    "chunk_type": "table_row",
-                    "page": block.get("page"),
-                    "heading": last_heading,
-                })
+                # Una fila normalmente es corta (unos pocos campos), pero
+                # una celda con un párrafo largo dentro (visto con datos
+                # reales: filas de 5000+ caracteres, 5-6x CHUNK_SIZE) no
+                # tenía ningún splitter — a diferencia de "table"/"prose"
+                # arriba. Igual que esas dos, se parte con table_splitter
+                # si excede CHUNK_SIZE; una fila normal (la inmensa
+                # mayoría) nunca lo toca porque split_text() devuelve el
+                # texto intacto cuando ya entra en un solo pedazo.
+                for piece in table_splitter.split_text(row_text):
+                    piece = piece.strip()
+                    if not piece:
+                        continue
+                    chunks.append({
+                        "chunk": len(chunks),
+                        "text": piece,
+                        "urls": None,
+                        "chunk_type": "table_row",
+                        "page": block.get("page"),
+                        "heading": last_heading,
+                    })
         else:
             if _looks_like_heading(block["text"]):
                 last_heading = block["text"].strip()
