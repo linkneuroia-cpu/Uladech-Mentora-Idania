@@ -438,18 +438,43 @@ async def _semantic_detect_field(
     # probado con datos reales de ambos cursos (ver informe de pruebas),
     # umbral con margen de seguridad entre el peor caso correcto (0.1665) y
     # el peor caso adversarial (0.1435).
-    best_field, best_score, second_score = None, 0.0, 0.0
-    for field_normalized in eligible_fields:
-        score = _cosine(query_embedding, cached[field_normalized])
-        if score > best_score:
-            best_field, second_score, best_score = field_normalized, best_score, score
-        elif score > second_score:
-            second_score = score
-    if best_score < min_score:
+    def _best_match(embedding: List[float]) -> tuple:
+        best_field, best_score, second_score = None, 0.0, 0.0
+        for field_normalized in eligible_fields:
+            score = _cosine(embedding, cached[field_normalized])
+            if score > best_score:
+                best_field, second_score, best_score = field_normalized, best_score, score
+            elif score > second_score:
+                second_score = score
+        return best_field, best_score, second_score
+
+    best_field, best_score, second_score = _best_match(query_embedding)
+    if best_score >= min_score and best_score - second_score >= 0.15:
+        return best_field
+
+    # Respaldo: el bloque completo de palabras no encontró nada confidente
+    # — puede ser porque una palabra "de atributo" genérica (ej. 'correo',
+    # 'teléfono', 'contacto') sumada al sinónimo real diluye el embedding
+    # conjunto lo suficiente para no alcanzar el margen. Probar cada
+    # palabra de la pregunta POR SEPARADO contra los mismos campos ya
+    # cacheados (sin re-embeber los campos, sea cual sea la palabra) —
+    # si el sinónimo real ('profesor') sigue estando solo entre las
+    # palabras de la pregunta, encuentra su campo igual que ya lo hace hoy
+    # sin la palabra extra. Encontrado con datos reales en producción:
+    # 'correo del profesor del curso' fallaba completo pero 'profesor'
+    # solo (dentro de esa misma pregunta) sí encuentra 'docente' con
+    # margen amplio — no es un caso curado, es el mismo mecanismo ya
+    # validado, aplicado palabra por palabra en vez de al bloque entero.
+    if len(query_words) <= 1:
         return None
-    if best_score - second_score < 0.15:
-        return None
-    return best_field
+    word_list = sorted(query_words)
+    word_embeddings = await dense.embed(word_list, is_query=True)
+    best_overall_field, best_overall_score = None, 0.0
+    for word_embedding in word_embeddings:
+        field, score, second = _best_match(word_embedding)
+        if score >= min_score and score - second >= 0.15 and score > best_overall_score:
+            best_overall_field, best_overall_score = field, score
+    return best_overall_field
 
 
 async def detect_field(
@@ -646,12 +671,25 @@ def _detect_row_by_value(collection_name: str, query: str, min_score: float = 0.
     de campo: un valor que se repite igual en muchas filas distintas (ej.
     'Odontología' como Programa de estudio en cada sesión semanal) no
     sirve para identificar UNA fila puntual — se excluye por frecuencia,
-    calculado de los datos, no de una lista fija."""
+    calculado de los datos, no de una lista fija.
+
+    Misma jerarquía de autoridad que resolve_field() (is_repeated_template):
+    entre varias filas que matchean el mismo valor por igual score (ej.
+    'Presencial' aparece como valor en decenas de sesiones semanales que
+    son plantillas repetidas, y también UNA vez en el sílabo real), la
+    fila de mayor autoridad (no-plantilla) debe ganar siempre, nunca el
+    orden arbitrario de la fila que SQL devuelva primero. Antes de este
+    fix esta función no leía is_repeated_template en absoluto — bug real
+    encontrado con datos reales: 'el curso es presencial o virtual?'
+    resolvía a una sesión semanal (plantilla) en vez de al sílabo (única),
+    dando 'presencial' cuando el valor real vigente era 'virtual
+    sincrónica'. Genérico: no depende de qué valor/campo es, solo de si
+    la fila viene de una tabla repetida o no."""
     query_words = _content_words(query)
     if not query_words:
         return None
     rows = db.fetch_all(
-        f"""SELECT DISTINCT value_normalized, row_id FROM {TABLE_NAME}
+        f"""SELECT DISTINCT value_normalized, row_id, is_repeated_template FROM {TABLE_NAME}
             WHERE qdrant_collection_name = %s AND row_id IS NOT NULL AND value_normalized IS NOT NULL""",
         (collection_name,),
     )
@@ -674,22 +712,33 @@ def _detect_row_by_value(collection_name: str, query: str, min_score: float = 0.
     if not query_words:
         return None
 
-    best_row_id, best_score = None, 0.0
-    for row in rows:
-        value_normalized, row_id = row["value_normalized"], row["row_id"]
-        all_value_words = value_word_map[value_normalized]
-        if not all_value_words or len(all_value_words) > 6:
-            continue  # valores muy largos (párrafos) no son "identificadores de fila" — se ignoran
-        value_words = all_value_words - common_words
-        if not value_words:
-            continue
-        overlap = query_words & value_words
-        if not overlap:
-            continue
-        union = query_words | value_words
-        score = len(overlap) / len(union)
-        if score > best_score:
-            best_row_id, best_score = row_id, score
+    def _best(candidate_rows) -> tuple:
+        best_row_id, best_score = None, 0.0
+        for row in candidate_rows:
+            value_normalized, row_id = row["value_normalized"], row["row_id"]
+            all_value_words = value_word_map[value_normalized]
+            if not all_value_words or len(all_value_words) > 6:
+                continue  # valores muy largos (párrafos) no son "identificadores de fila" — se ignoran
+            value_words = all_value_words - common_words
+            if not value_words:
+                continue
+            overlap = query_words & value_words
+            if not overlap:
+                continue
+            union = query_words | value_words
+            score = len(overlap) / len(union)
+            if score > best_score:
+                best_row_id, best_score = row_id, score
+        return best_row_id, best_score
+
+    unique_rows = [r for r in rows if not r["is_repeated_template"]]
+    template_rows = [r for r in rows if r["is_repeated_template"]]
+
+    best_row_id, best_score = _best(unique_rows)
+    if best_score >= min_score:
+        return best_row_id
+
+    best_row_id, best_score = _best(template_rows)
     return best_row_id if best_score >= min_score else None
 
 
