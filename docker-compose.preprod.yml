@@ -1,0 +1,116 @@
+# docker-compose.preprod.yml
+# ===========================
+# Réplica de F1 (Idania) en el servidor de PREPRODUCCIÓN
+# (80.190.77.138), pensada para correr contra el Moodle 5 de
+# moodle5.linkneuroia.com. NO se usa en producción (ahí el compose es
+# docker-compose.yml, con network_mode: host y servicios externos).
+#
+# A diferencia del compose de producción, acá Postgres y Qdrant son
+# contenedores PROPIOS de esta réplica (no se reutiliza uladech_postgres,
+# que es de otro equipo y no tiene credenciales confirmadas), y la app se
+# publica vía Traefik (red proxy_public) en vez de nginx/host networking.
+#
+# Uso (en el servidor, dentro del directorio del proyecto):
+#   docker compose -f docker-compose.preprod.yml up -d --build
+#
+# El `.env` de la app (no versionado) debe traer, para este entorno:
+#   ENV=PRODUCCION
+#   PG_HOST_PRODUCCION=postgres   PG_PORT_PRODUCCION=5432
+#   PG_USER_PRODUCCION=postgres   PG_PASSWORD_PRODUCCION=<la misma de abajo>
+#   PG_DATABASE_PRODUCCION=U_F1_Profundizacion
+#   QDRANT_HOST_PRODUCCION=qdrant QDRANT_PORT_PRODUCCION=6333
+#   MOODLE_URL=https://moodle5.linkneuroia.com  MOODLE_TOKEN=<token WS de Moodle 5>
+#   MOODLE_DB_HOST=moodle5_mariadb  MOODLE_DB_NAME=moodle5  MOODLE_DB_USER=moodle5 ...
+#   URL_PREFIX=  PUBLIC_BASE_URL=https://iauladech.linkneuroia.com
+#   (el gestor vive en la RAÍZ del subdominio — sin URL_PREFIX)
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: f1_idania_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_PASSWORD_PRODUCCION}
+      POSTGRES_DB: U_F1_Profundizacion
+    # Puerto 5432 del host ya lo usa lrsql_postgres — se publica en 55432
+    # para poder conectarse desde un cliente externo.
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d U_F1_Profundizacion"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: f1_idania_qdrant
+    restart: unless-stopped
+    # Publicado para el dashboard web (/dashboard) y clientes REST externos.
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrantdata:/qdrant/storage
+    networks:
+      - internal
+
+  app:
+    build: .
+    image: projects/f1-idania:latest
+    container_name: f1_idania_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - model-cache:/root/.cache
+      # temp_docs persistente (volumen propio). Además, si algún día se
+      # vuelve a usar URL_PREFIX, el lifespan interno no corre (uvicorn
+      # levanta el wrapper asgi_app) y validate_settings() no crearía el
+      # directorio; montarlo lo garantiza igual.
+      - temp-docs:/app/temp_docs
+    networks:
+      - internal
+      - proxy_public
+      # Red interna del Moodle 5 de preproducción: permite a moodle_calendar.py
+      # leer mdl_event directo contra `moodle5_mariadb` (el puerto 3306 del
+      # host apunta al MariaDB del Moodle viejo, no a este). Solo lectura.
+      - moodle5_internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy_public"
+      # El gestor de F1 vive en la RAÍZ del subdominio iauladech.linkneuroia.com
+      # (URL_PREFIX vacío, la app sirve sin prefijo). Los otros servicios del
+      # mismo host (f1-asistente-general, f1-retroalimentador, etc.) tienen
+      # routers con PathPrefix más específicos, así que siguen teniendo
+      # prioridad para sus rutas; este router solo toma lo que nadie más matchea.
+      - "traefik.http.routers.f1-idania.rule=Host(`iauladech.linkneuroia.com`)"
+      - "traefik.http.routers.f1-idania.entrypoints=websecure"
+      - "traefik.http.routers.f1-idania.tls=true"
+      - "traefik.http.routers.f1-idania.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.f1-idania.middlewares=compress@file,secure-headers@file"
+      - "traefik.http.services.f1-idania.loadbalancer.server.port=8100"
+
+networks:
+  internal:
+    name: f1-idania-internal
+  proxy_public:
+    external: true
+    name: proxy_public
+  moodle5_internal:
+    external: true
+    name: moodle5_moodle5_internal
+
+volumes:
+  pgdata:
+  qdrantdata:
+  model-cache:
+  temp-docs:

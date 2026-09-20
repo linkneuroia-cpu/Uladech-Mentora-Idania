@@ -324,15 +324,37 @@ def delete_asistente(asistente_id: int) -> None:
 
 # ── Sesiones y mensajes (usado por la ruta pública) ─────────────────────
 
-def compose_saludo(nombre: str, mensaje_bienvenida: Optional[str], student_fullname: Optional[str]) -> str:
+def compose_saludo(
+    nombre: str,
+    mensaje_bienvenida: Optional[str],
+    student_fullname: Optional[str],
+    week_info: Optional[Dict[str, Any]] = None,
+) -> str:
     """Arma el saludo inicial (mismo criterio en los 3 lugares que antes lo
     componían por separado: la página del chat, "Nueva conversación", y
     ahora también al guardarlo como el primer mensaje real de la sesión).
     Sin esto el saludo solo se pintaba en el navegador y nunca quedaba en
     `asistente_mensajes` — al recargar la página o revisar una conversación
-    vieja desde la sidebar, desaparecía."""
+    vieja desde la sidebar, desaparecía.
+
+    `week_info`: opcional, `{"week_number": int, "topic": str|None}` —
+    calculado por `query_router.get_current_week_summary()` desde la fecha
+    real de inicio del curso (Moodle), nunca inventado. Cuando viene, el
+    saludo engancha directo con "en qué semana va el curso" en vez de un
+    genérico sin contexto — pedido explícito: el saludo debe sentirse
+    conectado a dónde está el estudiante hoy, no una frase de bienvenida
+    fija repetida igual en cualquier semana. Si es None (curso sin fecha de
+    inicio resuelta, o todavía no arrancó), el saludo cae al genérico de
+    siempre, sin inventar una semana."""
     saludo = f"Hola {student_fullname}, " if student_fullname else "Hola, "
     resto = mensaje_bienvenida or f"soy **{nombre}**. Pregúntame lo que necesites sobre el curso."
+    if week_info and week_info.get("week_number"):
+        week_n = week_info["week_number"]
+        topic = week_info.get("topic")
+        if topic:
+            resto += f" Vamos por la **Semana {week_n}**, donde estamos viendo *{topic}* — decime si querés que arranquemos por ahí o si tenés otra duda."
+        else:
+            resto += f" El curso va por la **Semana {week_n}** — contame en qué te ayudo."
     return saludo + resto
 
 

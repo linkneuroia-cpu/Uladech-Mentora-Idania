@@ -52,3 +52,8 @@ av==12.3.0
 # ── postgres + login del gestor ──
 psycopg2-binary==2.9.12
 itsdangerous==2.2.0
+
+# NOTA: PyMySQL (driver de solo lectura para la DB de Moodle, usado por
+# moodle_calendar.py) se instala en el Dockerfile en su propio RUN, no acá —
+# así el cambio no invalida la capa cacheada de pip (que reinstala todo
+# torch/easyocr, varios GB) en cada deploy.

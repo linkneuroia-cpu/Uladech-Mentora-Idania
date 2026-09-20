@@ -19,6 +19,7 @@ from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
 from strategies.rerank import apply_source_boost, apply_week_boost, _extract_all_week_numbers
 import campos_estructurados
+import query_router
 
 # `rerank_score` es la probabilidad de relevancia del cross-encoder (0-1,
 # sigmoid ya aplicado por BGE/Cohere) ANTES del boost de curso_propio.
@@ -415,6 +416,8 @@ async def answer_query(
     top_n: Optional[int] = None,
     extra_system_prompt: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
+    course_id: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Pipeline completo: retrieve_rerank_boost() [Qdrant hybrid + rerank +
     boosts] + campos_estructurados.structured_lookup() [evidencia de tabla
@@ -472,6 +475,23 @@ async def answer_query(
     synthetic = _build_structured_evidence_candidate(structured)
     if synthetic is not None:
         candidates.insert(0, synthetic)
+
+    # Query Router (Incremento 1 del agente híbrido, ver plan de esta
+    # sesión) — reglas deterministas (regex) para preguntas de conteo/
+    # rango unidad-semana (Structured Query Engine) y de navegación
+    # (Course Map / Moodle real). Nunca usa el LLM para decidir la
+    # respuesta en sí, solo para fraseársela al estudiante. Igual que
+    # structured_lookup arriba: None = no aplica, sigue el RAG normal sin
+    # ningún cambio de comportamiento.
+    t0 = time.perf_counter()
+    try:
+        routed = query_router.route(collection_name, course_id, query, user_id=user_id)
+    except Exception as e:
+        print(f"⚠️ query_router falló (se ignora, sigue el RAG normal): {e}")
+        routed = None
+    timings["query_router_ms"] = (time.perf_counter() - t0) * 1000
+    if routed is not None:
+        candidates.insert(0, routed)
 
     # Si el estudiante nombró una fuente puntual (reglamento/manual/sílabo/
     # archivo/...), se verifica por metadata real (filename) cuáles

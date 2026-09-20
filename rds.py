@@ -279,13 +279,33 @@ def get_rd_for_collection(qdrant_collection_name: str) -> Optional[Dict[str, Any
 
 def resolve_collection(rd_id: int, moodle_courseid: int) -> Optional[str]:
     """(rd_id, courseid) -> nombre de colección de Qdrant, o None si no hay
-    ninguna colección de esa RD asignada a ese curso. Usado por la ruta
-    pública del asistente."""
+    ninguna colección de esa RD asignada a ese curso, O si ese curso
+    puntual está desactivado (`activo_asistente=False`) — un asistente
+    ligado a una RD por defecto responde para CUALQUIER courseid que esa
+    RD tenga registrado; este flag permite habilitar solo algunos cursos
+    de una RD (ej. un rollout controlado) sin tocar los demás courseids
+    de la misma RD ni el flag `activo` del asistente completo. Usado por
+    la ruta pública del asistente — mismo `None` que ya dispara el 404
+    "no hay colección asignada" de siempre, así que el estudiante ve el
+    mismo mensaje sin importar si es un curso sin colección o uno
+    puntualmente desactivado."""
     row = db.fetch_one(
-        "SELECT qdrant_collection_name FROM colecciones WHERE rd_id = %s AND moodle_courseid = %s",
+        "SELECT qdrant_collection_name FROM colecciones WHERE rd_id = %s AND moodle_courseid = %s AND activo_asistente = TRUE",
         (rd_id, moodle_courseid),
     )
     return row["qdrant_collection_name"] if row else None
+
+
+def set_curso_activo(entry_id: int, activo: bool) -> Dict[str, Any]:
+    """Activa/desactiva un curso puntual de una RD (ver resolve_collection)
+    — no borra ni toca la colección de Qdrant, solo si el asistente
+    responde o no para ese courseid."""
+    row = db.execute_returning(
+        "UPDATE colecciones SET activo_asistente = %s WHERE id = %s RETURNING *", (activo, entry_id),
+    )
+    if not row:
+        raise ValueError(f"El registro {entry_id} no existe")
+    return row
 
 
 def resolve_collection_normal(moodle_courseid: int) -> Optional[str]:

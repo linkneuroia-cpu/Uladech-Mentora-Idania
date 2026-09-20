@@ -425,6 +425,11 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 10v6M2 10l10-5 10 5-10 5-10-5z"/><path d="M6 12v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5"/></svg>
     <span class="nav-lbl">Gestión RD</span>
   </div>
+  <div class="nav" onclick="showMod('coursemap')" id="nav-coursemap">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+    <span class="nav-lbl">Course Map</span>
+    <span class="nav-badge b-auto">Moodle</span>
+  </div>
   <div class="nav" onclick="showMod('asis-list');asisLoad()" id="nav-asis-list">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
     <span class="nav-lbl">Asistentes</span>
@@ -941,6 +946,34 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   </div>
 </section>
 
+<!-- ═══ COURSE MAP (estructura real de Moodle) ═══ -->
+<section class="mod" id="mod-coursemap">
+  <div class="mod-hdr">
+    <h1><div class="accent" style="background:var(--blue-700)"></div>Course Map</h1>
+    <p>Estructura real del curso en Moodle (secciones/semanas, actividades con enlace real) y los datos de la sección General del aula (docente, correo, sede, horario) ya extraídos — cacheado en <code>course_map_cache</code>, se refresca solo cuando el docente sube contenido nuevo.</p>
+  </div>
+  <div class="card">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+      <div class="fg" style="min-width:140px"><label class="fl">Course ID (Moodle)</label><input class="fc" type="number" id="cm-courseid" placeholder="Ej: 1472"></div>
+      <div class="fg" style="flex:1;min-width:200px"><label class="fl">Colección (para sincronizar sección General)</label><input class="fc" id="cm-collection" placeholder="Ej: Curso_1472"></div>
+      <button class="btn btn-prim" onclick="cmLoad()">Cargar estructura</button>
+      <button class="btn btn-out" onclick="cmLoad(true)">Refrescar desde Moodle</button>
+      <button class="btn btn-ghost" onclick="cmSyncGeneral()">Sincronizar sección General</button>
+    </div>
+    <div id="cm-status" class="fh"></div>
+  </div>
+  <div id="cm-wrap" class="hidden">
+    <div class="card">
+      <div class="card-ttl">Datos del aula (sección General)</div>
+      <div id="cm-general" class="tw"></div>
+    </div>
+    <div class="card">
+      <div class="fb card-ttl"><span>Secciones (<span id="cm-count">0</span>)</span><span class="muted" id="cm-fetched"></span></div>
+      <div id="cm-sections"></div>
+    </div>
+  </div>
+</section>
+
 <!-- ═══ ASISTENTES (listado) ═══ -->
 <section class="mod" id="mod-asis-list">
   <div class="mod-hdr">
@@ -1282,7 +1315,7 @@ function poll(id,onOk,onErr,ms=2500){
 }
 
 // ── Nav ──
-const ALL_MODS=['semi','auto','upd','search','rd','asis-list','llmtest',
+const ALL_MODS=['semi','auto','upd','search','rd','coursemap','asis-list','llmtest',
   'cfg-keys',
   'qdrant-dash','qdrant-cols','qdrant-crear','qdrant-verificar','qdrant-endpoints','usuarios'];
 
@@ -1457,16 +1490,31 @@ async function rdCourses(rdId){
 }
 
 function rdCourseDi(rd,c){
+  // activo_asistente: si el asistente de esta RD responde o no para este
+  // courseid puntual (independiente del flag `activo` del asistente
+  // completo y de si tiene colección) — rollout controlado por curso.
+  const activo=c.activo_asistente!==false;
+  const activoTag=activo
+    ?`<span class="tag" style="background:var(--green-100,#dcfce7);color:var(--green-800,#166534)">Activo para estudiantes</span>`
+    :`<span class="tag" style="background:var(--red-100,#fee2e2);color:var(--red-800,#991b1b)">Desactivado</span>`;
   return `<div class="di">
       <div class="di-info">
-        <div class="di-name">Curso ${c.moodle_courseid}${c.qdrant_collection_name?` → ${esc(c.qdrant_collection_name)}`:''}</div>
+        <div class="di-name">Curso ${c.moodle_courseid}${c.qdrant_collection_name?` → ${esc(c.qdrant_collection_name)}`:''} ${activoTag}</div>
         <div class="di-meta">${c.qdrant_collection_name?`Colección asignada · ${qSchemaTag(c.vector_schema)}`:'Sin colección todavía'}</div>
       </div>
+      <button class="btn ${activo?'btn-ghost':'btn-prim'} btn-sm" onclick='rdCourseToggleActivo(${c.id},${rd.id},${!activo})'>${activo?'Desactivar':'Activar'}</button>
       ${c.qdrant_collection_name
         ?`<button class="btn btn-ghost btn-sm" onclick='closeModal();qLoadCols();showMod("qdrant-cols")'>Ver en Colecciones</button>`
         :`<button class="btn btn-prim btn-sm" onclick='rdCourseCreateCol(${rd.id},${c.moodle_courseid})'>Crear colección</button>
           <button class="btn btn-danger btn-sm" onclick='rdCourseRemove(${c.id},${rd.id})'>Quitar</button>`}
     </div>`;
+}
+
+async function rdCourseToggleActivo(entryId,rdId,nuevoValor){
+  try{
+    await api(`{{ URL_PREFIX }}/api/rds/courseids/${entryId}/activo`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({activo:nuevoValor})});
+    await rdCourses(rdId);
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
 }
 
 function rdCoursesHTML(rd){
@@ -1578,6 +1626,52 @@ async function rdDeleteConfirmed(id){
     await api('{{ URL_PREFIX }}/api/rds/'+id,{method:'DELETE'});
     rdLoad();
   }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+
+// ═══ COURSE MAP (estructura real de Moodle) ═══
+const MODNAME_ICON={resource:'📄',folder:'📁',url:'🔗',assign:'📝',quiz:'❓',forum:'💬',label:'🏷️',page:'📃'};
+async function cmLoad(refrescar){
+  const courseid=$('cm-courseid').value.trim();
+  if(!courseid){$('cm-status').innerHTML='<span style="color:var(--red-700)">Ingresá un Course ID.</span>';return;}
+  $('cm-status').innerHTML='Cargando…';
+  try{
+    const data=await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/estructura${refrescar?'?refrescar=true':''}`);
+    $('cm-status').innerHTML='';
+    show('cm-wrap');
+    $('cm-count').textContent=data.sections.length;
+    $('cm-fetched').textContent='Última actualización: '+new Date(data.fetched_at).toLocaleString();
+
+    const camposLabels=Object.keys(data.campos_generales||{});
+    $('cm-general').innerHTML=camposLabels.length
+      ? `<table><tbody>${camposLabels.map(k=>`<tr><td style="font-weight:600;white-space:nowrap">${esc(k)}</td><td>${esc(data.campos_generales[k])}</td></tr>`).join('')}</tbody></table>`
+      : `<p class="muted">Todavía no hay campos rellenados en la sección "General" del aula (docente, correo, whatsapp, horario, sede) — se muestran acá automáticamente cuando el docente los complete en Moodle.</p>`;
+
+    $('cm-sections').innerHTML=data.sections.map(s=>`
+      <div class="card" style="margin-bottom:10px">
+        <div class="fb card-ttl"><span>Sección ${s.section_number}${s.visible?'':' (oculta)'} — ${esc(s.name)}</span></div>
+        ${s.activities.length?`<div class="tw"><table><thead><tr><th>Tipo</th><th>Nombre</th><th>Enlace</th></tr></thead><tbody>
+          ${s.activities.map(a=>`<tr>
+            <td>${MODNAME_ICON[a.modname]||'▫️'} ${esc(a.modname)}</td>
+            <td>${esc(a.name)}${a.completion_tracking?' <span class="muted" style="font-size:11px">(con seguimiento)</span>':''}</td>
+            <td>${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener">Abrir ↗</a>`:'—'}</td>
+          </tr>`).join('')}
+        </tbody></table></div>`:'<p class="muted" style="margin:0">Sin actividades.</p>'}
+      </div>`).join('');
+  }catch(e){
+    $('cm-status').innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
+  }
+}
+async function cmSyncGeneral(){
+  const courseid=$('cm-courseid').value.trim();
+  const collection=$('cm-collection').value.trim();
+  if(!courseid||!collection){$('cm-status').innerHTML='<span style="color:var(--red-700)">Ingresá Course ID y colección.</span>';return;}
+  $('cm-status').innerHTML='Sincronizando…';
+  try{
+    const r=await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/sincronizar-general?collection_name=${encodeURIComponent(collection)}`,{method:'POST'});
+    $('cm-status').innerHTML=`Sincronizado: ${r.fields_synced.length?r.fields_synced.join(', '):'sin campos llenos todavía'}`;
+  }catch(e){
+    $('cm-status').innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
+  }
 }
 
 // ═══ CREAR ASISTENTE ═══

@@ -32,6 +32,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# PyMySQL en su propio RUN: driver de SOLO LECTURA para la base de datos de
+# Moodle (fechas de vencimiento en mdl_event, ver moodle_calendar.py). Se
+# separa de requirements.txt a propósito para no invalidar la capa cacheada
+# de arriba (que reinstala torch/easyocr/etc., varios GB) en cada deploy.
+RUN pip install --no-cache-dir PyMySQL==1.1.1
+
 COPY . .
 
 EXPOSE 8100

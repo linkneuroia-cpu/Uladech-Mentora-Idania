@@ -98,6 +98,8 @@ body{
 .msg.assistant li{margin-bottom:2px}
 .msg.assistant strong{font-weight:700}
 .msg.assistant code{background:var(--neutral-100);padding:1px 5px;border-radius:4px;font-size:12.5px}
+.msg.assistant a{color:var(--blue-700);text-decoration:underline;font-weight:600}
+.msg.assistant a:hover{color:var(--blue-800)}
 .msg.assistant pre.md-code{background:var(--neutral-100);border-radius:6px;padding:10px;overflow-x:auto;font-size:12.5px;margin:0 0 8px}
 .msg.assistant pre.md-code:last-child{margin-bottom:0}
 .msg.assistant .table-wrap{overflow-x:auto;margin:0 0 8px}
@@ -271,6 +273,10 @@ function mdToHtml(text){
   let s = esc(text);
   s = s.replace(/```([\s\S]*?)```/g, (_, code) => `<pre class="md-code">${code.trim()}</pre>`);
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Enlaces Markdown "[texto](url)" — el LLM los genera (ej. links reales
+  // de Moodle) pero sin esto quedaban como texto plano con corchetes
+  // literales, no clicables (bug real reportado).
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
 

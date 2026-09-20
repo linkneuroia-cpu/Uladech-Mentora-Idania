@@ -339,6 +339,18 @@ class Settings(BaseSettings):
     MOODLE_URL: str
     MOODLE_TOKEN: str
 
+    # ================= Moodle DB (solo lectura, OPCIONAL) =================
+    # Acceso directo a la base de datos de Moodle para datos que los Web
+    # Services no exponen de forma fiable (p.ej. fechas de vencimiento en
+    # mdl_event, ver moodle_calendar.py). Solo se configura en entornos con
+    # ese acceso (preproducción); si queda vacío, moodle_calendar.py intenta
+    # el webservice y, si también falla, degrada de forma honesta.
+    MOODLE_DB_HOST: str = ""
+    MOODLE_DB_PORT: int = 3306
+    MOODLE_DB_NAME: str = ""
+    MOODLE_DB_USER: str = ""
+    MOODLE_DB_PASSWORD: str = ""
+
     # ================= LLM Generation & Vision (Pipeline RAG) =================
     # Todas opcionales — se validan de forma perezosa por estrategia (no
     # bloquean el arranque de la app si faltan; solo la estrategia que las

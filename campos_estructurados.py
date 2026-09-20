@@ -29,6 +29,7 @@ import db
 import definitions as d
 from qdrant_admin import get_qdrant_admin
 from settings import settings
+import course_map as _course_map
 
 TABLE_NAME = "coleccion_campos_estructurados"
 
@@ -225,6 +226,53 @@ def sync_after_vectorization(collection_name: str) -> Dict[str, Any]:
     return {"retag": retag_summary, "index": index_summary}
 
 
+def sync_general_section_fields(collection_name: str, course_id: int) -> Dict[str, Any]:
+    """Extrae los campos ya rellenados de la sección 'General' del aula de
+    Moodle (course_map.parse_general_section_fields — Docente/Correo/
+    WhatsApp/Horario/Sede, lo que el curso tenga) y los persiste en el
+    índice estructurado con source_type='seccion_general', para que
+    queden disponibles por el mismo mecanismo genérico de consulta que ya
+    usa el resto del sistema (detect_field/resolve_field), no solo por el
+    query_router. Reemplaza (DELETE + INSERT) solo sus propias filas —
+    nunca toca las que vienen de Qdrant (ver el filtro correspondiente en
+    rebuild_index). Se llama automáticamente cuando se invalida el Course
+    Map por un cambio de archivos (ledger.sync_curso_archivos) y también
+    se puede disparar a mano desde el gestor."""
+    fields = _course_map.parse_general_section_fields(course_id)
+
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"DELETE FROM {TABLE_NAME} WHERE qdrant_collection_name = %s AND source_type = 'seccion_general'",
+            (collection_name,),
+        )
+        if fields:
+            row_id = f"{collection_name}::seccion_general::moodle"
+            psycopg2.extras.execute_values(
+                cur,
+                f"""INSERT INTO {TABLE_NAME}
+                    (qdrant_collection_name, document_filename, document_type, chunk_type,
+                     field_raw, field_normalized, value_raw, value_normalized,
+                     section_heading, page, table_signature, is_repeated_template, source_type, row_id)
+                    VALUES %s""",
+                [(
+                    collection_name, "Sección General del aula (Moodle)", "moodle", "table_row",
+                    label, normalize_field(label), value, normalize_value(value),
+                    "Sección General", None, None, False, "seccion_general", row_id,
+                ) for label, value in fields.items()],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    for cache_key in [k for k in _field_embedding_cache if k[0] == collection_name]:
+        _field_embedding_cache.pop(cache_key, None)
+
+    return {"collection": collection_name, "fields_synced": list(fields.keys())}
+
+
 def rebuild_index(collection_name: str) -> Dict[str, Any]:
     """Reconstruye el índice de una colección: borra sus filas actuales y
     vuelve a extraer desde los chunks tabla/table_row que YA están en
@@ -290,7 +338,15 @@ def rebuild_index(collection_name: str) -> Dict[str, Any]:
     conn.autocommit = False
     try:
         cur = conn.cursor()
-        cur.execute(f"DELETE FROM {TABLE_NAME} WHERE qdrant_collection_name = %s", (collection_name,))
+        # Excluye source_type='seccion_general' — esas filas NO vienen de
+        # Qdrant (ver sync_general_section_fields), así que reconstruir el
+        # índice desde los chunks de Qdrant no debe borrarlas; se
+        # mantienen sincronizadas por su propio flujo (ledger de Moodle).
+        cur.execute(
+            f"DELETE FROM {TABLE_NAME} WHERE qdrant_collection_name = %s "
+            f"AND (source_type IS NULL OR source_type != 'seccion_general')",
+            (collection_name,),
+        )
         if records:
             psycopg2.extras.execute_values(
                 cur,
@@ -793,4 +849,498 @@ async def structured_lookup(
     if row_id is not None:
         return _resolve_row(collection_name, row_id, query)
 
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════
+# STRUCTURED QUERY ENGINE (Incremento 1 del agente híbrido) — agregaciones
+# deterministas (COUNT/MIN/MAX) que NINGUNA función anterior de este módulo
+# resuelve: todas las de arriba devuelven un único valor de campo o una
+# única fila, nunca "cuántos distintos X hay". Nace del bug real de
+# producción: "¿cuántas semanas tiene la unidad 2?" no tenía ningún camino
+# determinista, así que el LLM contaba sobre chunks de RAG y confundía una
+# MUESTRA (3 semanas usadas en una fórmula de calificación de un Excel de
+# notas) con el TOTAL real (8 semanas, semanas 9-16) — confirmado en vivo
+# contra producción, dos rondas de refuerzo de prompt no lo cerraron.
+# ════════════════════════════════════════════════════════════════════
+
+# Jerarquía de autoridad configurable (tabla fuente_autoridad, ver
+# db_migration_course_map_y_fuente_autoridad.sql) — desempata entre tipos
+# de fuente cuando la autoridad binaria de is_repeated_template no alcanza
+# (dos fuentes "únicas" pero de distinto tipo, ej. sílabo vs. un Excel de
+# notas). Cacheada en memoria por poco tiempo — es una tabla chica que casi
+# nunca cambia, pero se recalcula por colección para no pegarle a Postgres
+# en cada pregunta.
+_authority_cache: Optional[Dict[str, int]] = None
+
+
+def _get_source_authority() -> Dict[str, int]:
+    global _authority_cache
+    if _authority_cache is None:
+        rows = db.fetch_all(
+            "SELECT source_type, prioridad FROM fuente_autoridad WHERE activo = TRUE"
+        )
+        _authority_cache = {r["source_type"]: r["prioridad"] for r in rows}
+    return _authority_cache
+
+
+def _infer_document_source_type(source_type: str, n_fields: int, template_ratio: float, max_fields_in_collection: int) -> str:
+    """Clasificación GENÉRICA (no depende del nombre de ningún archivo ni
+    curso puntual) de qué tipo de documento es, usando señales que ya
+    calcula el pipeline para cualquier colección:
+    - 'bibliografia' viene tal cual del tag ya existente en Qdrant/índice.
+    - dentro de 'curso_propio': el documento con MÁS campos distintos de
+      toda la colección es, con datos reales de ambos cursos probados esta
+      sesión, el sílabo (47 campos en Curso_1472 vs. 18-19 de cada sesión
+      semanal y ≤12 de cualquier otro material) — un sílabo es
+      estructuralmente el documento administrativo más denso del curso.
+    - un documento cuyas filas son CASI TODAS de una estructura de tabla
+      repetida (is_repeated_template) en un porcentaje alto es una sesión
+      semanal (la plantilla "Programa/Unidad/Semana/Modalidad/..." se
+      repite idéntica en cada semana, solo cambian los valores) — OJO:
+      is_repeated_template es una señal de ESTRUCTURA repetida, no de
+      "valor vacío"; los valores de Unidad/Semana de estas filas SÍ son
+      reales y hay que poder contarlos (ver count_distinct más abajo, que
+      deliberadamente NO filtra por is_repeated_template).
+    - todo lo demás dentro de curso_propio queda como material docente
+      genérico."""
+    if source_type == "bibliografia":
+        return "bibliografia"
+    if n_fields == max_fields_in_collection and n_fields >= 25:
+        return "silabo"
+    if template_ratio >= 0.5:
+        # Umbral calibrado con datos reales de Curso_1472: las sesiones
+        # semanales miden 0.75-1.0 (una semana con contenido más variado
+        # bajó a 0.75), y TODO lo demás (sílabo, bibliografía, material
+        # suelto) mide exactamente 0.0 — separación amplia, no un punto
+        # de corte ajustado.
+        return "sesion_semanal"
+    return "material_docente"
+
+
+def _document_source_types(collection_name: str) -> Dict[str, str]:
+    """document_filename -> tipo de fuente inferido, para toda la colección
+    de una sola pasada (evita N consultas)."""
+    rows = db.fetch_all(
+        f"""SELECT document_filename, source_type,
+                   COUNT(DISTINCT field_normalized) AS n_fields,
+                   AVG(CASE WHEN is_repeated_template THEN 1.0 ELSE 0.0 END) AS template_ratio
+            FROM {TABLE_NAME}
+            WHERE qdrant_collection_name = %s
+            GROUP BY document_filename, source_type""",
+        (collection_name,),
+    )
+    if not rows:
+        return {}
+    max_fields = max(r["n_fields"] for r in rows)
+    return {
+        r["document_filename"]: _infer_document_source_type(
+            r["source_type"], r["n_fields"], float(r["template_ratio"]), max_fields
+        )
+        for r in rows
+    }
+
+
+_ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X",
+          "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX"]
+
+
+def _arabic_to_roman_prefix(text: str) -> Optional[str]:
+    """'2' o 'ii' -> 'ii' (normalizado, para matchear el prefijo real
+    'ii. especialidades...' que queda en value_normalized). Genérico hasta
+    20 (ningún curso real tiene más unidades que eso); no depende de
+    contenido de ningún curso puntual, solo de numeración."""
+    t = text.strip().lower()
+    if t.isdigit():
+        n = int(t)
+        if 1 <= n < len(_ROMAN):
+            return _ROMAN[n].lower()
+        return None
+    if t and all(c in "ivxlcdm" for c in t):
+        return t
+    return None
+
+
+_SECTION_WEEK_RE = re.compile(r"^\s*\S+\s+(\d+)\s*:?")
+_SECTION_UNIT_RE = re.compile(r"unidad\s+([ivx\d]+)", re.IGNORECASE)
+# Término académico genérico de examen de rezagados — NO es contenido
+# curado de ningún curso puntual (igual que "General" ya se excluye por
+# ser section_number==0, esto excluye la semana de examen de aplazados
+# por lo que ES, no por a qué curso pertenece).
+_SECTION_APLAZADOS_RE = re.compile(r"aplazad", re.IGNORECASE)
+
+
+def _moodle_weeks_with_units(course_id: int) -> Dict[int, Dict[str, Any]]:
+    """Semanas REALES del curso según Moodle (course_map.py, ya cacheado,
+    sin llamada nueva) — fuente de verdad de CUÁLES semanas existen,
+    independiente de si tienen contenido vectorizado o no. El número de
+    semana se extrae de forma genérica (primera palabra + número al
+    inicio del nombre de sección, ej. "Semana 12 :" o "Senana 04 :" — el
+    typo real de Moodle no rompe esto porque no se busca la palabra
+    "semana" literal, solo el patrón posicional palabra+número). Si el
+    propio nombre de la sección menciona "Unidad X" (visto con datos
+    reales en las semanas de cierre de unidad), se captura como
+    confirmación directa de Moodle, no inferencia."""
+    course = _course_map.get_course_map(course_id)
+    result: Dict[int, Dict[str, Any]] = {}
+    for s in course.sections:
+        if s.section_number == 0:
+            continue
+        if _SECTION_APLAZADOS_RE.search(s.name):
+            continue
+        m = _SECTION_WEEK_RE.match(s.name)
+        if not m:
+            continue
+        week_n = int(m.group(1))
+        topic = s.name[m.end():].strip(" :.-") or s.name
+        unit_m = _SECTION_UNIT_RE.search(s.name)
+        unit_roman = _arabic_to_roman_prefix(unit_m.group(1)) if unit_m else None
+        result[week_n] = {"topic": topic, "unit_roman": unit_roman}
+    return result
+
+
+def _extract_week_number(value: str) -> Optional[int]:
+    m = re.search(r"\d+", value)
+    return int(m.group()) if m else None
+
+
+def _merge_weeks_with_course_map(
+    distinct_values: set, extras: Dict[str, str], course_id: int,
+    unit_filter_roman: Optional[str],
+) -> Dict[str, Any]:
+    """Completa distinct_values/extras con semanas reales de Moodle que no
+    están en el índice estructurado (ver docstring de count_distinct).
+    Sin filtro de unidad: agrega CUALQUIER semana real de Moodle que
+    falte. Con filtro de unidad: solo agrega una semana si (a) su propio
+    nombre de sección confirma esa unidad, o (b) cae en un hueco INTERIOR
+    entre dos semanas ya confirmadas de la misma unidad por el índice
+    (nunca se extrapola más allá de ese rango confirmado). Devuelve
+    también `sources` (value -> 'indexado'|'moodle'|'continuidad') para
+    que la evidencia sea transparente sobre el origen de cada dato."""
+    sources = {v: "indexado" for v in distinct_values}
+    try:
+        moodle_weeks = _moodle_weeks_with_units(course_id)
+    except Exception as e:
+        print(f"⚠️ No se pudo leer el Course Map para completar semanas (se ignora): {e}")
+        return {"values": distinct_values, "extras": extras, "sources": sources}
+
+    covered = {n: v for v in distinct_values if (n := _extract_week_number(v)) is not None}
+
+    if unit_filter_roman is None:
+        for week_n, info in moodle_weeks.items():
+            if week_n in covered:
+                continue
+            value = f"semana {week_n} / sesion {week_n}"
+            distinct_values.add(value)
+            extras.setdefault(value, info["topic"])
+            sources[value] = "moodle"
+        return {"values": distinct_values, "extras": extras, "sources": sources}
+
+    if not covered:
+        return {"values": distinct_values, "extras": extras, "sources": sources}
+    lo, hi = min(covered), max(covered)
+    for week_n, info in moodle_weeks.items():
+        if week_n in covered:
+            continue
+        value = f"semana {week_n} / sesion {week_n}"
+        if info["unit_roman"] == unit_filter_roman:
+            distinct_values.add(value)
+            extras.setdefault(value, info["topic"])
+            sources[value] = "moodle"
+        elif info["unit_roman"] is None and lo < week_n < hi:
+            distinct_values.add(value)
+            extras.setdefault(value, info["topic"])
+            sources[value] = "continuidad"
+    return {"values": distinct_values, "extras": extras, "sources": sources}
+
+
+def _table_key(r: Dict[str, Any]) -> tuple:
+    """Misma 'fila lógica' = mismo documento + misma tabla física (prefijo
+    'pt{N}' del row_id) — CORREGIDO tras verificar con datos reales que
+    una tabla campo:valor vertical (ej. sesión semanal) da un row_id
+    DISTINTO por cada fila (una fila = un campo), así que Unidad y Semana
+    NUNCA comparten row_id exacto — comparten documento + tabla."""
+    rid = r["row_id"] or ""
+    m = re.match(r"^(.*::pt\d+)::r\d+$", rid)
+    return (r["document_filename"], m.group(1) if m else rid)
+
+
+def count_distinct(
+    collection_name: str, group_field: str,
+    filter_field: Optional[str] = None, filter_value: Optional[str] = None,
+    extra_field: Optional[str] = None, course_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """P.ej. count_distinct(coll, group_field='semana / sesion',
+    filter_field='unidad', filter_value='II') -> cuántas semanas distintas
+    tiene la unidad II. Si filter_field/filter_value son None, cuenta
+    TODOS los valores distintos de group_field entre los documentos
+    elegibles (ej. "¿cuántas semanas tiene el curso?", sin filtrar por
+    unidad). `extra_field` (opcional): un campo adicional a traer por cada
+    fila que matchea (ej. 'tema') — para preguntas tipo "¿de qué trata
+    cada semana?" sin una segunda consulta.
+
+    Deliberadamente NO filtra por is_repeated_template (ver docstring de
+    _infer_document_source_type: esa señal marca ESTRUCTURA repetida, no
+    valor vacío — las semanas de cada sesión son datos reales distintos
+    aunque la tabla que las contiene tenga la misma forma en las 16
+    semanas). En su lugar, restringe a documentos clasificados como
+    'silabo' o 'sesion_semanal' — la fuente de verdad real para conteos de
+    unidad/semana — excluyendo bibliografía y material docente suelto, que
+    es lo que de verdad evita el bug (un Excel de notas no es
+    'sesion_semanal' ni 'silabo', así que nunca entra a este conteo aunque
+    esté indexado).
+
+    `course_id` (opcional): si se pasa Y group_field es semana/sesión, el
+    resultado se completa con las semanas REALES del curso en Moodle
+    (course_map.py) que no tengan contenido vectorizado todavía — el
+    índice estructurado depende de qué se vectorizó, Moodle no (ver
+    _merge_weeks_with_course_map). Sin esto, un hueco de vectorización
+    (ej. una semana sin documento indexado) hacía que el conteo pareciera
+    menor al real — encontrado con datos reales (Curso_1472, semana 4)."""
+    has_filter = bool(filter_field and filter_value)
+    field_n = normalize_field(filter_field) if has_filter else None
+    value_n = (_arabic_to_roman_prefix(filter_value) or normalize_value(filter_value)) if has_filter else None
+    group_n = normalize_field(group_field)
+    extra_n = normalize_field(extra_field) if extra_field else None
+    is_week_query = "semana" in group_n
+
+    distinct_values: set = set()
+    matched_docs: set = set()
+    extras: Dict[str, str] = {}
+
+    doc_types = _document_source_types(collection_name)
+    eligible_docs = [f for f, t in doc_types.items() if t in ("silabo", "sesion_semanal")]
+    if eligible_docs:
+        wanted_fields = {group_n} | ({field_n} if field_n else set()) | ({extra_n} if extra_n else set())
+        placeholders = ",".join(["%s"] * len(eligible_docs))
+        field_placeholders = ",".join(["%s"] * len(wanted_fields))
+        rows = db.fetch_all(
+            f"""SELECT document_filename, row_id, field_normalized, value_normalized, value_raw
+                FROM {TABLE_NAME}
+                WHERE qdrant_collection_name = %s AND document_filename IN ({placeholders})
+                  AND field_normalized IN ({field_placeholders})""",
+            (collection_name, *eligible_docs, *wanted_fields),
+        )
+        tables: Dict[Any, Dict[str, str]] = {}
+        tables_raw: Dict[Any, Dict[str, str]] = {}
+        for r in rows:
+            key = _table_key(r)
+            tables.setdefault(key, {})[r["field_normalized"]] = r["value_normalized"]
+            tables_raw.setdefault(key, {})[r["field_normalized"]] = r["value_raw"]
+
+        for key, fields in tables.items():
+            doc = key[0]
+            gv = fields.get(group_n)
+            if not gv:
+                continue
+            if has_filter:
+                fv = fields.get(field_n)
+                if not fv or not (fv == value_n or fv.startswith(value_n + ".")):
+                    continue
+            distinct_values.add(gv)
+            matched_docs.add(doc)
+            if extra_n and fields.get(extra_n):
+                # Texto original (con tildes/mayúsculas), no el normalizado
+                # usado para matchear — el normalizado es para comparar de
+                # forma robusta, no para mostrárselo al estudiante (bug
+                # real: el saludo mostraba "evolucion de la odontologia
+                # peruana" sin tildes cuando se interpola directo, sin
+                # pasar por el LLM que lo "arregla" al redactar la
+                # respuesta conversacional).
+                extras[gv] = tables_raw.get(key, {}).get(extra_n) or fields[extra_n]
+
+    sources: Dict[str, str] = {v: "indexado" for v in distinct_values}
+    if course_id and is_week_query:
+        merged = _merge_weeks_with_course_map(distinct_values, extras, course_id, value_n if has_filter else None)
+        distinct_values, extras, sources = merged["values"], merged["extras"], merged["sources"]
+
+    if not distinct_values:
+        return {"status": "not_found", "reason": "valor_de_filtro_no_encontrado", "filter_value_normalizado": value_n}
+
+    return {
+        "status": "confident",
+        "count": len(distinct_values),
+        "values": sorted(distinct_values),
+        "evidence_documents": sorted(matched_docs),
+        "matched_by": "structured_aggregate",
+        "topics": extras or None,
+        "sources": sources,
+    }
+
+
+def get_table_rows(
+    collection_name: str, field_names: List[str],
+    source_type_filter: Optional[str] = "silabo",
+) -> List[Dict[str, str]]:
+    """Trae TODAS las filas de una tabla del índice estructurado que
+    contengan cualquiera de `field_names`, agrupadas por fila lógica
+    (documento + `row_id` completo) y deduplicadas por CONTENIDO.
+
+    Pensada para tablas "de varias columnas" del sílabo (p.ej. la de
+    "Evidencias evaluables / Instrumento / Ponderación", ver A.1 del plan):
+    cada fila real se reconstruye como un dict {campo: valor} y se devuelve
+    una sola vez aunque el mismo sílabo esté indexado en .docx Y .pdf (cada
+    formato es un documento/row_id distinto, pero el contenido de la fila es
+    idéntico — de ahí la deduplicación por contenido). Genérica: no
+    hardcodea ningún nombre de campo ni de curso, los recibe como parámetro.
+
+    `source_type_filter` (por defecto 'silabo'): restringe a documentos
+    clasificados por `_document_source_types()`. None = sin filtro (todos
+    los documentos de la colección). Devuelve [] si no hay filas que
+    cumplan (nunca inventa una fila vacía)."""
+    wanted = {normalize_field(f) for f in (field_names or [])}
+    if not wanted:
+        return []
+
+    params: List[Any] = [collection_name]
+    doc_filter = ""
+    if source_type_filter is not None:
+        doc_types = _document_source_types(collection_name)
+        eligible = [f for f, t in doc_types.items() if t == source_type_filter]
+        if not eligible:
+            return []
+        placeholders = ",".join(["%s"] * len(eligible))
+        doc_filter = f" AND document_filename IN ({placeholders})"
+        params.extend(eligible)
+
+    field_placeholders = ",".join(["%s"] * len(wanted))
+    params.extend(sorted(wanted))
+    rows = db.fetch_all(
+        f"""SELECT document_filename, row_id, field_normalized, value_raw
+            FROM {TABLE_NAME}
+            WHERE qdrant_collection_name = %s{doc_filter}
+              AND field_normalized IN ({field_placeholders})
+            ORDER BY document_filename, row_id""",
+        tuple(params),
+    )
+
+    # Agrupar por FILA LÓGICA = document_filename + row_id COMPLETO (con el
+    # sufijo '::rN'). A diferencia de count_distinct (que agrupa con
+    # _table_key() porque ahí cada campo de una tabla vertical es su propia
+    # fila), acá cada fila lógica de una tabla horizontal de varias columnas
+    # comparte exactamente el mismo row_id ('...::pt98::r0') para todos sus
+    # campos. Usar _table_key() colapsaría r0/r1/r2 en un solo dict y
+    # perdería filas reales — verificado con datos reales: Curso_1541
+    # devolvía 1 fila en vez de 3.
+    logical_rows: Dict[Any, Dict[str, str]] = {}
+    for r in rows:
+        logical_rows.setdefault((r["document_filename"], r["row_id"]), {})[r["field_normalized"]] = r["value_raw"]
+
+    unique: Dict[Any, Dict[str, str]] = {}
+    for fields in logical_rows.values():
+        if not fields:
+            continue
+        # Clave de deduplicación = combinación EXACTA de valores (no el
+        # row_id): la misma fila indexada desde .docx y .pdf comparte
+        # contenido pero no documento/row_id, así que se conserva una sola
+        # copia (la primera aparición, en orden document_filename/row_id).
+        key = tuple(sorted((k, v or "") for k, v in fields.items()))
+        unique.setdefault(key, fields)
+    return list(unique.values())
+
+
+def get_field_by_week(
+    collection_name: str, field_name: str, week_field: str = "semana / sesion",
+    source_type_filter: Optional[str] = "sesion_semanal",
+) -> Dict[int, str]:
+    """{número de semana -> valor real de `field_name`} tomado del documento
+    de sesión de esa semana (p.ej. 'evidencia de aprendizaje' o 'criterios
+    de evaluación').
+
+    Agrupa por DOCUMENTO, no por tabla física: en los documentos de sesión
+    semanal el campo 'semana / sesion' y los campos de contenido viven en
+    tablas físicas DISTINTAS del mismo documento, así que
+    count_distinct(extra_field=...) — que agrupa por `_table_key` — NO los
+    cruza (verificado con datos reales: devolvía 16 semanas pero sin
+    evidencia/criterios). Como cada documento de sesión corresponde a UNA
+    sola semana, agrupar por document_filename sí los cruza correctamente.
+    El número de semana se extrae del propio valor real (no del nombre del
+    archivo). Semanas sin el campo pedido simplemente no aparecen en el
+    resultado — nunca se inventa un valor."""
+    week_n = normalize_field(week_field)
+    field_n = normalize_field(field_name)
+    if not field_n or field_n == week_n:
+        return {}
+
+    doc_types = _document_source_types(collection_name)
+    if source_type_filter is not None:
+        eligible = [f for f, t in doc_types.items() if t == source_type_filter]
+    else:
+        eligible = list(doc_types.keys())
+    if not eligible:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(eligible))
+    rows = db.fetch_all(
+        f"""SELECT document_filename, field_normalized, value_raw
+            FROM {TABLE_NAME}
+            WHERE qdrant_collection_name = %s AND document_filename IN ({placeholders})
+              AND field_normalized IN (%s, %s)""",
+        (collection_name, *eligible, week_n, field_n),
+    )
+
+    by_doc: Dict[str, Dict[str, str]] = {}
+    for r in rows:
+        by_doc.setdefault(r["document_filename"], {})[r["field_normalized"]] = r["value_raw"]
+
+    result: Dict[int, str] = {}
+    for fields in by_doc.values():
+        week_val = fields.get(week_n)
+        target = fields.get(field_n)
+        if not week_val or not target:
+            continue
+        m = re.search(r"\d+", week_val)
+        if m:
+            result[int(m.group())] = target
+    return result
+
+
+def range_bounds(
+    collection_name: str, group_field: str, filter_field: str, filter_value: str,
+    course_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Primer/último valor (orden natural por número extraído del texto,
+    ej. 'semana 9' < 'semana 16' — NO orden lexicográfico, que pondría
+    'semana 16' antes que 'semana 9'). Reusa la misma agrupación por tabla
+    física que count_distinct(), incluido el completado desde el Course
+    Map real si se pasa course_id."""
+    base = count_distinct(collection_name, group_field, filter_field, filter_value, course_id=course_id)
+    if base["status"] != "confident":
+        return base
+
+    def _extract_number(v: str) -> Optional[int]:
+        m = re.search(r"\d+", v)
+        return int(m.group()) if m else None
+
+    numbered = [(v, _extract_number(v)) for v in base["values"]]
+    numbered = [(v, n) for v, n in numbered if n is not None]
+    if not numbered:
+        return {**base, "first": min(base["values"]), "last": max(base["values"]), "numeric_order": False}
+
+    numbered.sort(key=lambda t: t[1])
+    return {**base, "first": numbered[0][0], "last": numbered[-1][0], "numeric_order": True}
+
+
+def structured_query(collection_name: str, parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Punto de entrada público del Structured Query Engine, análogo a
+    structured_lookup() pero para agregaciones. `parsed` viene del Query
+    Router (extracción por regex de la pregunta, NUNCA del LLM — ver
+    query_router.py): {"operation": "count"|"range", "entity": "unidad"|
+    None, "value": "II"|None, "group_field": "semana / sesion",
+    "with_topics": bool}. `entity`/`value` en None = sin filtro, cuenta
+    TODAS las semanas del curso (no de una unidad puntual — ej. "¿cuántas
+    semanas tiene el curso?"). None si la operación no se reconoce; el
+    caller sigue con RAG normal."""
+    operation = parsed.get("operation")
+    entity = parsed.get("entity")
+    value = parsed.get("value")
+    group_field = parsed.get("group_field", "semana / sesion")
+    extra_field = "tema" if parsed.get("with_topics") else None
+    course_id = parsed.get("course_id")
+    if operation == "count":
+        return count_distinct(collection_name, group_field, entity, value, extra_field=extra_field, course_id=course_id)
+    if operation == "range":
+        if not entity or not value:
+            return None
+        return range_bounds(collection_name, group_field, entity, value, course_id=course_id)
     return None

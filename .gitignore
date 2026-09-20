@@ -1,6 +1,7 @@
 # Ignorar
 .env
 deploy/.env.deploy
+deploy/.env.deploy.preprod
 venv/
 __pycache__/
 temp_docs/
@@ -9,5 +10,25 @@ temp_docs/
 runtime_config.json
 *.dump
 
+# Contiene credenciales reales de servidores en texto plano (ver su propio
+# encabezado) — nunca commitear.
+PLAN.md
+
 # Material de referencia de diseño (no forma parte de la app, es pesado)
 3_wowdash-tailwind-css-admin-dashboard-template-*.zip
+
+# Resultados/datasets generados por los scripts de evaluación (no son
+# código; se regeneran con run_eval_*.py / evaluate_*.py).
+eval_dataset_*.json
+evaluation_*_results.*
+evaluation_*_summary.json
+full_eval_comparison_results*.json
+three_way_eval_comparison_results.json
+adversarial_test_results.json
+baseline_eval_results*.json
+revectorize_*.json
+evaluate_vectorization_results.json
+_tmp_recent_1472.json
+
+# Material de prueba pesado (no es parte de la app)
+Data prueba/

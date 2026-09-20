@@ -53,6 +53,9 @@ import auth
 import rds
 import ledger
 import assistants
+import course_map
+import campos_estructurados
+import query_router
 from strategies import registry as strategy_registry
 from strategies.runtime_config import get_runtime_config
 from qdrant_admin import CollectionCreateRequest, CollectionUpdateRequest, get_qdrant_admin
@@ -678,6 +681,10 @@ class RdCourseidRequest(BaseModel):
     moodle_courseid: int
 
 
+class RdCursoActivoRequest(BaseModel):
+    activo: bool
+
+
 @app.post("/api/rds/{rd_id}/courseids", status_code=201, tags=["RD"])
 async def add_rd_courseid_endpoint(rd_id: int, req: RdCourseidRequest):
     """Registra un courseid más bajo esta RD (todavía sin colección)."""
@@ -693,6 +700,17 @@ async def remove_rd_courseid_endpoint(entry_id: int):
     try:
         await db.run(rds.remove_courseid_entry, entry_id)
         return {"success": True}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.patch("/api/rds/courseids/{entry_id}/activo", tags=["RD"])
+async def set_rd_courseid_activo_endpoint(entry_id: int, req: RdCursoActivoRequest):
+    """Activa/desactiva el asistente para un courseid puntual de una RD,
+    sin tocar los demás cursos de esa misma RD ni el `activo` del
+    asistente completo — ver rds.resolve_collection()."""
+    try:
+        return await db.run(rds.set_curso_activo, entry_id, req.activo)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -714,6 +732,67 @@ async def moodle_curso_endpoint(courseid: int):
         # no la escribe a mano y no se equivoca de dominio entre dev/prod.
         "url": f"{settings.MOODLE_URL.rstrip('/')}/course/view.php?id={courseid}",
     }
+
+
+@app.get("/api/moodle/curso/{courseid}/estructura", tags=["RD"])
+async def moodle_curso_estructura_endpoint(courseid: int, refrescar: bool = Query(False)):
+    """Course Map real del curso (secciones + actividades reales de
+    Moodle, con cmid/url/visibilidad) — expone course_map.get_course_map()
+    (ya usada internamente por el Query Router/Índice de Campos
+    Estructurados desde el gestor, en vez de solo desde scripts. Sirve
+    para cualquier curso, no solo 1472/1541. `refrescar=true` ignora la
+    caché y vuelve a consultar Moodle en vivo."""
+    loop = asyncio.get_event_loop()
+    try:
+        course = await loop.run_in_executor(
+            None, lambda: course_map.get_course_map(courseid, force_refresh=refrescar)
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Error consultando Moodle: {e}")
+    try:
+        campos_generales = await loop.run_in_executor(
+            None, lambda: course_map.parse_general_section_fields(courseid)
+        )
+    except Exception:
+        campos_generales = {}
+    return {
+        "course_id": course.course_id,
+        "fetched_at": course.fetched_at,
+        "campos_generales": campos_generales,
+        "sections": [
+            {
+                "section_number": s.section_number,
+                "name": s.name,
+                "visible": s.visible,
+                "activities": [
+                    {
+                        "cmid": a.cmid, "name": a.name, "modname": a.modname,
+                        "url": a.url, "visible": a.visible,
+                        "completion_tracking": a.completion_tracking,
+                    }
+                    for a in s.activities
+                ],
+            }
+            for s in course.sections
+        ],
+    }
+
+
+@app.post("/api/moodle/curso/{courseid}/sincronizar-general", tags=["RD"])
+async def moodle_sincronizar_general_endpoint(courseid: int, collection_name: str = Query(...)):
+    """Dispara manualmente campos_estructurados.sync_general_section_fields()
+    — mismo procedimiento que ya corre automáticamente cuando
+    ledger.sync_curso_archivos() detecta cambios, expuesto acá para
+    poder correrlo bajo demanda desde el gestor sin esperar un sync de
+    archivos."""
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, lambda: campos_estructurados.sync_general_section_fields(collection_name, courseid)
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Error sincronizando campos de la sección General: {e}")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -907,6 +986,19 @@ def _build_asistente_context(
     return "\n".join(partes)
 
 
+def _safe_week_info(collection_name: Optional[str], courseid: int) -> Optional[Dict[str, Any]]:
+    """Info de semana actual para personalizar el saludo — best-effort:
+    nunca debe romper la carga del chat. Sin colección/courseid reales
+    (asistente "normal" sin curso, sentinel 0) devuelve None sin más."""
+    if not collection_name or not courseid:
+        return None
+    try:
+        return query_router.get_current_week_summary(collection_name, courseid)
+    except Exception as e:
+        print(f"⚠️ no se pudo calcular la semana actual para el saludo (se ignora): {e}")
+        return None
+
+
 def _userid_from_documento(documento: str) -> int:
     """Deriva un moodle_userid entero y ESTABLE a partir de un documento de
     identidad, para un visitante sin cuenta de Moodle (ver asistente_chat_page).
@@ -980,7 +1072,8 @@ async def asistente_chat_page(
         effective_userid = _userid_from_documento(documento)
         moodle_username = documento
         fullname = nombre
-    saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname)
+    week_info = await db.run(_safe_week_info, collection_name, courseid)
+    saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname, week_info)
 
     # ¿Ya existía esta sesión con historial antes de este load? -> se
     # muestra (no se guarda) el mensaje de reencuentro en vez del saludo.
@@ -1014,7 +1107,7 @@ async def asistente_chat_page(
     reencuentro = None
     if tenia_historial:
         resto_reencuentro = asistente.get("mensaje_reencuentro") or "¡qué bueno verte de nuevo! Seguimos donde lo dejamos."
-        reencuentro = assistants.compose_saludo(asistente["nombre"], resto_reencuentro, fullname)
+        reencuentro = assistants.compose_saludo(asistente["nombre"], resto_reencuentro, fullname, week_info)
 
     return templates.TemplateResponse(
         "asistente_chat.html",
@@ -1090,6 +1183,16 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
             generation_strategy_name=asistente.get("generation_strategy"),
             extra_system_prompt=_build_asistente_context(asistente, rd, sesion.get("moodle_fullname")),
             history=history,
+            # sentinel 0 = asistente "normal" sin curso real (ver
+            # AsistenteMensajeRequest/asistente_chat_page) — el Query
+            # Router necesita un courseid real de Moodle para navegación,
+            # así que se pasa None en ese caso (mismo efecto que hoy: cae
+            # a RAG normal para cualquier pregunta de navegación).
+            course_id=sesion["moodle_courseid"] or None,
+            # SIEMPRE el moodle_userid de esta sesión — nunca un valor que
+            # venga del cliente en la pregunta misma, para que PROGRESS no
+            # pueda usarse para consultar el avance de otro estudiante.
+            user_id=sesion["moodle_userid"] or None,
         )
     except Exception as e:
         raise HTTPException(502, f"Error generando la respuesta: {e}")
@@ -1148,7 +1251,8 @@ async def asistente_nueva_conversacion(token: str, req: AsistenteNuevaConversaci
         moodle_info = await loop.run_in_executor(None, get_moodle_user_info, req.userid)
         moodle_username = moodle_info["username"]
         fullname = moodle_info["fullname"]
-    saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname)
+    week_info = await db.run(_safe_week_info, collection_name, req.courseid)
+    saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname, week_info)
 
     sesion = await db.run(
         assistants.get_or_create_sesion,

@@ -128,6 +128,30 @@ def sync_curso_archivos(collection_name: str, curid: int) -> Dict[str, Any]:
         )
     resumen["eliminados"] = len(eliminados)
 
+    # Invalida el Course Map cacheado de este curso si hubo cualquier
+    # cambio real (alta/posible actualización/baja) — el docente subió o
+    # quitó contenido, así que la próxima pregunta de navegación debe
+    # traer la estructura fresca de Moodle en vez de esperar el TTL de
+    # respaldo (24h, ver course_map.py). Import perezoso para no crear un
+    # ciclo de imports (course_map no importa ledger).
+    if resumen["nuevos"] or resumen["posibles_actualizaciones"] or resumen["eliminados"]:
+        try:
+            import course_map
+            course_map.invalidate_course_map(curid)
+        except Exception as e:
+            print(f"⚠️ No se pudo invalidar el Course Map de {curid} (se ignora): {e}")
+
+        # Re-extrae los campos de la sección "General" del aula (Docente/
+        # Correo/WhatsApp/Horario/Sede, lo que esté lleno) cada vez que el
+        # curso tuvo cambios reales — mismo criterio que la invalidación
+        # del Course Map de arriba: "batch" = reutilizar este flujo ya
+        # existente, no uno nuevo. Import perezoso, mismo motivo.
+        try:
+            import campos_estructurados
+            campos_estructurados.sync_general_section_fields(collection_name, curid)
+        except Exception as e:
+            print(f"⚠️ No se pudo sincronizar los campos de la sección General de {curid} (se ignora): {e}")
+
     cola = db.fetch_all(
         "SELECT * FROM curso_archivos WHERE qdrant_collection_name=%s "
         "AND estado IN ('nuevo','posible_actualizacion') ORDER BY filename",
