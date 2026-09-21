@@ -906,7 +906,13 @@ def _infer_document_source_type(source_type: str, n_fields: int, template_ratio:
       genérico."""
     if source_type == "bibliografia":
         return "bibliografia"
-    if n_fields == max_fields_in_collection and n_fields >= 25:
+    # Piso 20 (antes 25): con el fix de A.5 el sílabo ya no arrastra los
+    # nombres de campo corruptos que inflaban su conteo, y en colecciones
+    # reales queda en ~21-25 campos. Las sesiones semanales tienen <=20
+    # (verificado con datos reales de Curso_1472/Curso_1541 y de la réplica
+    # de preprod Curso_11/Curso_12), así que 20 sigue separando bien al
+    # sílabo (el de MÁS campos) de una sesión.
+    if n_fields == max_fields_in_collection and n_fields >= 20:
         return "silabo"
     if template_ratio >= 0.5:
         # Umbral calibrado con datos reales de Curso_1472: las sesiones
