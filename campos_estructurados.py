@@ -932,7 +932,14 @@ def _document_source_types(collection_name: str) -> Dict[str, str]:
     )
     if not rows:
         return {}
-    max_fields = max(r["n_fields"] for r in rows)
+    # El máximo de campos (señal de "cuál documento es el sílabo") se calcula
+    # SOLO entre documentos que no son bibliografía: un material de lectura
+    # extenso puede acumular muchos campos distintos (y nunca es el sílabo),
+    # y con el fix de A.5 puede terminar con más campos que el sílabo real,
+    # desplazándolo de la clasificación. La bibliografía ya se clasifica como
+    # tal por su propio source_type, así que no debe competir por el máximo.
+    candidate_fields = [r["n_fields"] for r in rows if r["source_type"] != "bibliografia"]
+    max_fields = max(candidate_fields) if candidate_fields else max(r["n_fields"] for r in rows)
     return {
         r["document_filename"]: _infer_document_source_type(
             r["source_type"], r["n_fields"], float(r["template_ratio"]), max_fields

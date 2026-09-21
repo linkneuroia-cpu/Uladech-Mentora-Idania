@@ -240,7 +240,72 @@ def _table_to_markdown(rows: List[List[Optional[str]]]) -> str:
     return "\n".join(lines)
 
 
-def _parse_markdown_table_rows(md_text: str) -> List[Dict[str, str]]:
+# Un NOMBRE DE CAMPO estructurado real es corto: verificado con datos
+# reales, el máximo en las dos colecciones con índice estructurado es 38
+# caracteres. Una "clave" más larga que esto es, en la práctica, un
+# fragmento de prosa mal detectado como tabla por pdfplumber (Fix A.5,
+# Causa 2) — no se vuelca al índice estructurado.
+_MAX_FIELD_NAME_LEN = 40
+
+
+def _split_md_row(line: str) -> List[str]:
+    """Celdas no vacías de una línea de tabla Markdown, en orden (comprime
+    las celdas de relleno vacías que pdfplumber intercala por fusión de
+    celdas)."""
+    return [c.strip() for c in line.strip("|").split("|") if c.strip()]
+
+
+def _markdown_table_header_and_body(md_text: str):
+    """(lines, header_cells, body_lines) de una tabla Markdown GFM, o None
+    si el texto no tiene forma de tabla (la 2ª línea no es el separador
+    GFM esperado)."""
+    lines = [ln.strip() for ln in md_text.strip().split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return None
+    if not re.match(r"^\|?[\s:-]+\|?[\s:|-]*$", lines[1]):
+        return None
+    return lines, _split_md_row(lines[0]), lines[2:]
+
+
+def _looks_like_prose(text: str) -> bool:
+    """Heurística genérica de "esto es prosa, no una fila de tabla real":
+    texto largo, con varias oraciones completas, o con palabras cortadas a
+    fin de línea (típico de un PDF justificado en columnas que pdfplumber
+    confunde con una tabla). Usada para descartar filas de UNA sola celda
+    (Fix A.5, Causa 2)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t) > 200:
+        return True
+    # Oración completa: minúscula + punto + espacio + mayúscula (exigir la
+    # minúscula evita falsos positivos con etiquetas numeradas "0. Programa").
+    if len(re.findall(r"[a-záéíóúñ]\.\s+[A-ZÁÉÍÓÚÑ]", t)) >= 2:
+        return True
+    if re.search(r"[a-záéíóúñ]- [a-záéíóúñ]", t):
+        return True
+    return False
+
+
+def _looks_like_prose_key(key: str) -> bool:
+    """True si `key` no puede ser un NOMBRE DE CAMPO real (es prosa mal
+    detectada como clave): más largo que _MAX_FIELD_NAME_LEN, con palabras
+    cortadas a fin de línea, o con oraciones completas."""
+    k = (key or "").strip()
+    if len(k) > _MAX_FIELD_NAME_LEN:
+        return True
+    if re.search(r"[a-záéíóúñ]- [a-záéíóúñ]", k):
+        return True
+    # Oración completa (minúscula + punto + mayúscula) — no confundir con
+    # etiquetas numeradas tipo "0. Programa" o "9.1.1 ...".
+    if re.search(r"[a-záéíóúñ]\.\s+[A-ZÁÉÍÓÚÑ]", k):
+        return True
+    return False
+
+
+def _parse_markdown_table_rows(
+    md_text: str, override_header: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     """Parsea una tabla Markdown GFM (la misma sintaxis que produce
     _table_to_markdown) de vuelta a filas {encabezado: valor} — genérico
     para cualquier tabla real, sin asumir nada sobre el significado de las
@@ -258,43 +323,64 @@ def _parse_markdown_table_rows(md_text: str) -> List[Dict[str, str]]:
        otra, ej. "0. Programa de estudio | Odontología") — tratarla como
        encabezado descartaría ese primer dato y arruinaría el resto. Por
        eso el criterio de si hay encabezado es el número de columnas
-       reales tras comprimir, no la posición de la fila."""
-    lines = [ln.strip() for ln in md_text.strip().split("\n") if ln.strip()]
-    if len(lines) < 2:
+       reales tras comprimir, no la posición de la fila.
+
+    `override_header` (Fix A.5, Causa 1): encabezado real de la tabla
+    inmediatamente anterior del mismo documento, usado para parsear un
+    fragmento de tabla cuyo propio encabezado quedó roto por un salto de
+    página. Cuando se pasa, la fila 0 del fragmento se descarta (es el
+    encabezado roto) y las filas se emparejan contra ese encabezado."""
+    parts = _markdown_table_header_and_body(md_text)
+    if parts is None:
         return []
+    lines, header_cells, body_lines = parts
 
-    def _split_row(line: str) -> List[str]:
-        return [c.strip() for c in line.strip("|").split("|") if c.strip()]
-
-    if not re.match(r"^\|?[\s:-]+\|?[\s:|-]*$", lines[1]):
-        return []  # la segunda línea no es el separador GFM esperado — no es una tabla real
-
-    header_cells = _split_row(lines[0])
-    body_lines = lines[2:]
+    if override_header is not None:
+        header_cells = list(override_header)
+    elif len(header_cells) == 1:
+        # Fix A.5-1 (seguridad): un header comprimido a 1 celda pero con
+        # filas de cuerpo de más de 1 celda NO es una tabla de una columna
+        # genuina — es un header ROTO (tabla partida por salto de página).
+        # No adivinar una estructura falsa: sin filas.
+        if any(len(_split_md_row(l)) > 1 for l in body_lines):
+            return []
 
     if len(header_cells) == 1:
         # Tabla de una sola columna real — cada línea (incluida la
         # "header") ya es un dato autocontenido, sin key:value que armar.
-        rows = [{"": header_cells[0]}] if header_cells[0] else []
+        # Fix A.5-3: descarta párrafos de prosa mal detectados como tabla
+        # (no los vuelca al índice estructurado).
+        rows = []
+        first = header_cells[0]
+        if first and not _looks_like_prose(first):
+            rows.append({"": first})
         for line in body_lines:
-            cells = _split_row(line)
-            if cells:
-                rows.append({"": " ".join(cells)})
+            cells = _split_md_row(line)
+            if not cells:
+                continue
+            joined = " ".join(cells)
+            if not _looks_like_prose(joined):
+                rows.append({"": joined})
         return rows
 
-    if len(header_cells) == 2:
+    if len(header_cells) == 2 and override_header is None:
         # Lista campo/valor sin encabezado real — la fila 0 es un dato más.
+        # Fix A.5-3: descarta filas cuya "clave" es prosa, no un campo real.
         rows = []
         for line in [lines[0]] + body_lines:
-            cells = _split_row(line)
-            if len(cells) == 2:
+            cells = _split_md_row(line)
+            if len(cells) == 2 and not _looks_like_prose_key(cells[0]):
                 rows.append({cells[0]: cells[1]})
         return rows
 
-    # 3+ columnas reales: la fila 0 sí son encabezados genuinos.
+    # 3+ columnas reales (o header provisto como override): la fila 0 (o el
+    # override) son encabezados genuinos. Fix A.5-3: si algún encabezado es
+    # prosa, la tabla entera es una mala detección — no se generan filas.
+    if any(_looks_like_prose_key(h) for h in header_cells):
+        return []
     rows = []
     for line in body_lines:
-        cells = _split_row(line)
+        cells = _split_md_row(line)
         if len(cells) != len(header_cells):
             continue  # fila con cantidad de columnas reales distinta — se omite, no se adivina
         row = {h: c for h, c in zip(header_cells, cells)}
@@ -1097,6 +1183,10 @@ def chunk_structured_blocks(
     # de ningún documento) — se propaga a los chunks siguientes hasta que
     # aparece un encabezado nuevo, igual que en cualquier documento real.
     last_heading: Optional[str] = None
+    # Fix A.5-2: encabezado REAL de la última tabla vista (mismo documento),
+    # para reusarlo cuando la tabla siguiente sea una continuación con el
+    # header roto por un salto de página.
+    prev_table_header: Optional[List[str]] = None
 
     def _looks_like_heading(text: str) -> bool:
         t = text.strip()
@@ -1155,10 +1245,29 @@ def chunk_structured_blocks(
             # arriba. Partir 13 plantillas casi idénticas en filas
             # individuales generaba decenas de fragmentos cortos que
             # ahogaban a la única fila real por pura cantidad.
+            # Fix A.5-2: detectar si este bloque es la CONTINUACIÓN de la
+            # tabla anterior con el header roto (tabla partida por salto de
+            # página). Si el header comprimido tiene menos celdas que el
+            # máximo de celdas reales de sus filas de cuerpo, es un header
+            # roto; se reusa el header real de la tabla inmediatamente
+            # anterior si su cantidad de columnas coincide con esas filas.
+            override_header: Optional[List[str]] = None
+            parts = _markdown_table_header_and_body(block["text"])
+            if parts is not None:
+                _, header_cells, body_lines = parts
+                max_body = max((len(_split_md_row(l)) for l in body_lines), default=0)
+                if max_body > len(header_cells):
+                    if prev_table_header is not None and len(prev_table_header) == max_body:
+                        override_header = prev_table_header
+                else:
+                    prev_table_header = header_cells or None
+            else:
+                prev_table_header = None
+
             sig = table_signature(block["text"]) if repeated_signatures else None
             if sig is not None and sig in repeated_signatures:
                 continue
-            for row in _parse_markdown_table_rows(block["text"]):
+            for row in _parse_markdown_table_rows(block["text"], override_header=override_header):
                 row_text = " | ".join(f"{k}: {v}" if k else v for k, v in row.items())
                 if not row_text.strip():
                     continue
@@ -1183,6 +1292,9 @@ def chunk_structured_blocks(
                         "heading": last_heading,
                     })
         else:
+            # Un bloque de prosa rompe la continuidad: la próxima tabla ya no
+            # es continuación de la anterior.
+            prev_table_header = None
             if _looks_like_heading(block["text"]):
                 last_heading = block["text"].strip()
             prose_buffer.append(block)
