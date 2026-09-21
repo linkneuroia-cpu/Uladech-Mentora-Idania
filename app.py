@@ -735,7 +735,10 @@ async def moodle_curso_endpoint(courseid: int):
 
 
 @app.get("/api/moodle/curso/{courseid}/estructura", tags=["RD"])
-async def moodle_curso_estructura_endpoint(courseid: int, refrescar: bool = Query(False)):
+async def moodle_curso_estructura_endpoint(
+    courseid: int, refrescar: bool = Query(False),
+    collection_name: Optional[str] = Query(None, description="Si se pasa, incluye los campos indexados (auto+manual) de esa colección."),
+):
     """Course Map real del curso (secciones + actividades reales de
     Moodle, con cmid/url/visibilidad) — expone course_map.get_course_map()
     (ya usada internamente por el Query Router/Índice de Campos
@@ -755,10 +758,19 @@ async def moodle_curso_estructura_endpoint(courseid: int, refrescar: bool = Quer
         )
     except Exception:
         campos_generales = {}
+    campos_indexados: List[Dict[str, Any]] = []
+    if collection_name:
+        try:
+            campos_indexados = await loop.run_in_executor(
+                None, lambda: campos_estructurados.list_general_section_fields(collection_name)
+            )
+        except Exception:
+            campos_indexados = []
     return {
         "course_id": course.course_id,
         "fetched_at": course.fetched_at,
         "campos_generales": campos_generales,
+        "campos_generales_indexados": campos_indexados,
         "sections": [
             {
                 "section_number": s.section_number,
@@ -793,6 +805,35 @@ async def moodle_sincronizar_general_endpoint(courseid: int, collection_name: st
     except Exception as e:
         raise HTTPException(502, f"Error sincronizando campos de la sección General: {e}")
     return result
+
+
+class CampoGeneralRequest(BaseModel):
+    collection_name: str
+    field: str
+    value: str
+
+
+@app.post("/api/moodle/curso/{courseid}/campo-general", tags=["RD"])
+async def set_campo_general_endpoint(courseid: int, req: CampoGeneralRequest):
+    """Crea/actualiza A MANO un campo de "Datos generales del aula" (Parte
+    2.5). Genérico: el nombre del campo es libre. Se guarda con
+    source_type='seccion_general_manual', así NO lo borra un re-sync
+    automático desde Moodle."""
+    try:
+        return await db.run(
+            campos_estructurados.set_general_section_field,
+            req.collection_name, req.field, req.value,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/moodle/curso/{courseid}/campo-general/{field}", tags=["RD"])
+async def delete_campo_general_endpoint(courseid: int, field: str, collection_name: str = Query(...)):
+    """Borra UN campo cargado a mano (nunca toca los automáticos)."""
+    return await db.run(
+        campos_estructurados.delete_general_section_field, collection_name, field,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════

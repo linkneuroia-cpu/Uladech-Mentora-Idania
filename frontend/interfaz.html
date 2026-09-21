@@ -1630,21 +1630,75 @@ async function rdDeleteConfirmed(id){
 
 // ═══ COURSE MAP (estructura real de Moodle) ═══
 const MODNAME_ICON={resource:'📄',folder:'📁',url:'🔗',assign:'📝',quiz:'❓',forum:'💬',label:'🏷️',page:'📃'};
+function cmRenderGeneral(courseid, collection, data){
+  const idx=data.campos_generales_indexados||[];
+  let html='';
+  if(idx.length){
+    html+=`<table><thead><tr><th>Campo</th><th>Valor</th><th>Origen</th><th></th></tr></thead><tbody>`;
+    html+=idx.map((r,i)=>`<tr>
+      <td style="font-weight:600;white-space:nowrap">${esc(r.field)}</td>
+      <td><input class="fc" id="cmf-${i}" value="${esc(r.value)}"></td>
+      <td>${r.source==='manual'?'<span class="muted">manual</span>':'<span class="muted">auto (Moodle)</span>'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-out btn-sm" data-act="save" data-field="${esc(r.field)}" data-idx="${i}">Guardar</button>
+        ${r.source==='manual'?`<button class="btn btn-out btn-sm" data-act="del" data-field="${esc(r.field)}">Borrar</button>`:''}
+      </td></tr>`).join('');
+    html+=`</tbody></table>`;
+  }else{
+    html=`<p class="muted">Todavía no hay campos cargados en "Datos generales del aula". Agregá uno abajo o usá "Sincronizar datos del aula".</p>`;
+  }
+  if(collection){
+    html+=`<div class="fb" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+      <input class="fc" id="cm-new-field" placeholder="Campo (ej. DOCENTE)" style="max-width:220px">
+      <input class="fc" id="cm-new-value" placeholder="Valor (ej. Dr. Bernuy Torres)" style="flex:1;min-width:200px">
+      <button class="btn btn-prim btn-sm" id="cm-add-field">Agregar campo</button>
+    </div>`;
+  }
+  const box=$('cm-general'); box.innerHTML=html;
+  box.querySelectorAll('button[data-act]').forEach(b=>{
+    b.onclick=()=>{
+      const field=b.dataset.field;
+      if(b.dataset.act==='save') cmSaveField(courseid, collection, field, ($('cmf-'+b.dataset.idx)||{}).value||'');
+      else cmDeleteField(courseid, collection, field);
+    };
+  });
+  const add=$('cm-add-field');
+  if(add) add.onclick=()=>cmSaveField(courseid, collection, ($('cm-new-field')||{}).value||'', ($('cm-new-value')||{}).value||'', true);
+}
+async function cmSaveField(courseid, collection, field, value, isNew){
+  if(!courseid||!collection||!field.trim()){ $('cm-status').innerHTML='<span style="color:var(--red-700)">Course ID, colección y nombre de campo son obligatorios.</span>'; return; }
+  $('cm-status').innerHTML='Guardando…';
+  try{
+    await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/campo-general`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({collection_name:collection,field:field.trim(),value:value})});
+    $('cm-status').innerHTML='Campo guardado.';
+    await cmLoad();
+  }catch(e){ $('cm-status').innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`; }
+}
+async function cmDeleteField(courseid, collection, field){
+  if(!confirm(`¿Borrar el campo manual "${field}"?`)) return;
+  $('cm-status').innerHTML='Borrando…';
+  try{
+    await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/campo-general/${encodeURIComponent(field)}?collection_name=${encodeURIComponent(collection)}`,{method:'DELETE'});
+    $('cm-status').innerHTML='Campo borrado.';
+    await cmLoad();
+  }catch(e){ $('cm-status').innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`; }
+}
 async function cmLoad(refrescar){
   const courseid=$('cm-courseid').value.trim();
   if(!courseid){$('cm-status').innerHTML='<span style="color:var(--red-700)">Ingresá un Course ID.</span>';return;}
+  const collection=($('cm-collection')?$('cm-collection').value:'').trim();
   $('cm-status').innerHTML='Cargando…';
   try{
-    const data=await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/estructura${refrescar?'?refrescar=true':''}`);
+    const base=`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/estructura`;
+    const qs=refrescar?'?refrescar=true':'';
+    const url=collection?`${base}${qs?qs+'&':'?'}collection_name=${encodeURIComponent(collection)}`:`${base}${qs}`;
+    const data=await api(url);
     $('cm-status').innerHTML='';
     show('cm-wrap');
     $('cm-count').textContent=data.sections.length;
     $('cm-fetched').textContent='Última actualización: '+new Date(data.fetched_at).toLocaleString();
 
-    const camposLabels=Object.keys(data.campos_generales||{});
-    $('cm-general').innerHTML=camposLabels.length
-      ? `<table><tbody>${camposLabels.map(k=>`<tr><td style="font-weight:600;white-space:nowrap">${esc(k)}</td><td>${esc(data.campos_generales[k])}</td></tr>`).join('')}</tbody></table>`
-      : `<p class="muted">Todavía no hay campos rellenados en la sección "General" del aula (docente, correo, whatsapp, horario, sede) — se muestran acá automáticamente cuando el docente los complete en Moodle.</p>`;
+    cmRenderGeneral(courseid, collection, data);
 
     $('cm-sections').innerHTML=data.sections.map(s=>`
       <div class="card" style="margin-bottom:10px">
@@ -1669,6 +1723,7 @@ async function cmSyncGeneral(){
   try{
     const r=await api(`{{ URL_PREFIX }}/api/moodle/curso/${courseid}/sincronizar-general?collection_name=${encodeURIComponent(collection)}`,{method:'POST'});
     $('cm-status').innerHTML=`Sincronizado: ${r.fields_synced.length?r.fields_synced.join(', '):'sin campos llenos todavía'}`;
+    await cmLoad();  // refresca la tabla de Datos del aula (los manuales sobreviven)
   }catch(e){
     $('cm-status').innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
   }

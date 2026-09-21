@@ -354,17 +354,22 @@ def build_generation_prompt(
     parts = []
     if document_reference is not None:
         if not requested_source_found and course_map_match:
-            # Fix 1.6: el recurso NO está indexado pero SÍ existe en el aula
-            # (Course Map real) — se lo damos al modelo con su enlace para
-            # que diga "existe pero todavía no está disponible para
-            # consultar", nunca "no existe".
+            # Fix 1.6: el nombre pedido NO coincide con ningún archivo
+            # indexado en Qdrant, pero SÍ con un recurso real del aula
+            # (Course Map). Causa real: el nombre del RECURSO en Moodle suele
+            # ser distinto del nombre del ARCHIVO vectorizado. Se le da al
+            # modelo el nombre y enlace reales para que responda con
+            # precisión, sin afirmar que "no existe" ni presentar otro
+            # documento como si fuera el pedido.
             parts.append(
                 f"[VERIFICACIÓN DE FUENTE SOLICITADA] El estudiante pidió específicamente: "
-                f"\"{document_reference}\". No hay contenido indexado de ese documento, PERO existe en el "
-                f"aula virtual como \"{course_map_match.get('name')}\" (enlace real: "
-                f"{course_map_match.get('url')}). Decile al estudiante que ese recurso SÍ existe en el aula "
-                f"(con su enlace) pero que su contenido todavía no está disponible para consultar acá — "
-                f"NUNCA respondas que no existe."
+                f"\"{document_reference}\". No hay ningún documento indexado con ese nombre exacto, PERO en "
+                f"el aula virtual SÍ existe el recurso \"{course_map_match.get('name')}\" (enlace real: "
+                f"{course_map_match.get('url')}). Respondé con precisión: ese recurso existe en el aula "
+                f"(dale el enlace real), pero no pudiste confirmar que corresponda exactamente al documento "
+                f"indexado (el nombre del archivo puede ser distinto) — sugerile verificarlo con el enlace. "
+                f"NUNCA respondas que no existe, y nunca presentes el contenido de otro documento como si "
+                f"fuera ese recurso sin aclarar que es un documento distinto."
             )
         else:
             estado = "SÍ" if requested_source_found else "NO"

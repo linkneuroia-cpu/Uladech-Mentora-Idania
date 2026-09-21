@@ -273,17 +273,120 @@ def sync_general_section_fields(collection_name: str, course_id: int) -> Dict[st
     return {"collection": collection_name, "fields_synced": list(fields.keys())}
 
 
+# source_type de los campos cargados A MANO desde el gestor. Separado del
+# automático ('seccion_general') a propósito: sync_general_section_fields()
+# hace DELETE+INSERT de TODO 'seccion_general', así que lo manual debe vivir
+# aparte para sobrevivir a una re-sincronización desde Moodle.
+_MANUAL_SECTION_SOURCE = "seccion_manual"  # <= 20 chars (límite de la columna source_type)
+
+
 def get_general_section_fields(collection_name: str) -> Dict[str, str]:
     """{etiqueta_real: valor} de los campos de la sección "General" del aula
-    (source_type='seccion_general', ver sync_general_section_fields) — p.ej.
-    {'DOCENTE': 'Dr. ...', 'CORREO': '...', 'HORARIO': '...'}. {} si no hay
-    ninguno cargado (nunca inventa)."""
+    — p.ej. {'DOCENTE': 'Dr. ...', 'CORREO': '...', 'HORARIO': '...'}. Lee
+    los campos automáticos (source_type='seccion_general', ver
+    sync_general_section_fields) Y los cargados a mano
+    ('seccion_general_manual'); ante un mismo nombre de campo, gana el
+    manual (corrección humana explícita). {} si no hay ninguno (nunca
+    inventa)."""
     rows = db.fetch_all(
-        f"SELECT field_raw, value_raw FROM {TABLE_NAME} "
-        "WHERE qdrant_collection_name = %s AND source_type = 'seccion_general'",
-        (collection_name,),
+        f"SELECT field_raw, value_raw, source_type FROM {TABLE_NAME} "
+        "WHERE qdrant_collection_name = %s AND source_type IN ('seccion_general', %s)",
+        (collection_name, _MANUAL_SECTION_SOURCE),
     )
-    return {r["field_raw"]: r["value_raw"] for r in rows if r["field_raw"]}
+    auto: Dict[str, str] = {}
+    manual: Dict[str, str] = {}
+    for r in rows:
+        if not r["field_raw"]:
+            continue
+        (manual if r["source_type"] == _MANUAL_SECTION_SOURCE else auto)[r["field_raw"]] = r["value_raw"]
+    return {**auto, **manual}
+
+
+def list_general_section_fields(collection_name: str) -> List[Dict[str, Any]]:
+    """Lista los campos de la sección General CON su origen, para el gestor:
+    [{"field", "value", "source": "auto"|"manual"}]. Ante un mismo nombre de
+    campo, gana el manual (mismo criterio que get_general_section_fields)."""
+    rows = db.fetch_all(
+        f"SELECT field_raw, value_raw, source_type FROM {TABLE_NAME} "
+        "WHERE qdrant_collection_name = %s AND source_type IN ('seccion_general', %s) "
+        "ORDER BY field_raw",
+        (collection_name, _MANUAL_SECTION_SOURCE),
+    )
+    by_field: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if not r["field_raw"]:
+            continue
+        is_manual = r["source_type"] == _MANUAL_SECTION_SOURCE
+        prev = by_field.get(r["field_raw"])
+        if prev and prev["source"] == "manual" and not is_manual:
+            continue  # el manual ya ganó
+        by_field[r["field_raw"]] = {
+            "field": r["field_raw"], "value": r["value_raw"],
+            "source": "manual" if is_manual else "auto",
+        }
+    return sorted(by_field.values(), key=lambda x: x["field"])
+
+
+def _invalidate_field_embedding_cache(collection_name: str) -> None:
+    for k in [k for k in _field_embedding_cache if k[0] == collection_name]:
+        _field_embedding_cache.pop(k, None)
+
+
+def set_general_section_field(collection_name: str, field_raw: str, value_raw: str) -> Dict[str, Any]:
+    """Crea/actualiza a MANO UN campo de la sección General (upsert por
+    nombre de campo, source_type='seccion_general_manual'). No toca los demás
+    campos ni los automáticos. Genérico: el nombre del campo es libre."""
+    field_raw = (field_raw or "").strip()
+    if not field_raw:
+        raise ValueError("El nombre del campo no puede estar vacío.")
+    value_raw = "" if value_raw is None else str(value_raw).strip()
+    row_id = f"{collection_name}::{_MANUAL_SECTION_SOURCE}::{normalize_field(field_raw)}"
+
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"DELETE FROM {TABLE_NAME} WHERE qdrant_collection_name = %s AND source_type = %s AND field_raw = %s",
+            (collection_name, _MANUAL_SECTION_SOURCE, field_raw),
+        )
+        cur.execute(
+            f"""INSERT INTO {TABLE_NAME}
+                (qdrant_collection_name, document_filename, document_type, chunk_type,
+                 field_raw, field_normalized, value_raw, value_normalized,
+                 section_heading, page, table_signature, is_repeated_template, source_type, row_id)
+                VALUES (%s, %s, 'moodle', 'table_row', %s, %s, %s, %s,
+                        'Sección General', NULL, NULL, FALSE, %s, %s)""",
+            (
+                collection_name, "Datos generales del aula (manual)", field_raw, normalize_field(field_raw),
+                value_raw, normalize_value(value_raw), _MANUAL_SECTION_SOURCE, row_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _invalidate_field_embedding_cache(collection_name)
+    return {"collection": collection_name, "field": field_raw, "value": value_raw, "source": "manual"}
+
+
+def delete_general_section_field(collection_name: str, field_raw: str) -> Dict[str, Any]:
+    """Borra UN campo cargado a mano (nunca toca los automáticos)."""
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"DELETE FROM {TABLE_NAME} WHERE qdrant_collection_name = %s AND source_type = %s AND field_raw = %s",
+            (collection_name, _MANUAL_SECTION_SOURCE, field_raw),
+        )
+        deleted = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+
+    _invalidate_field_embedding_cache(collection_name)
+    return {"collection": collection_name, "field": field_raw, "deleted": deleted}
 
 
 def rebuild_index(collection_name: str) -> Dict[str, Any]:
