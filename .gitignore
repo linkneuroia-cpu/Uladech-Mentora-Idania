@@ -32,3 +32,8 @@ _tmp_recent_1472.json
 
 # Material de prueba pesado (no es parte de la app)
 Data prueba/
+
+# Playwright / Node (suite E2E)
+node_modules/
+test-results/
+playwright-report/

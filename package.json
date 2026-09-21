@@ -1,0 +1,13 @@
+{
+  "name": "gestor-f1-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pruebas Playwright del gestor y del chat público de F1 (Idania).",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:preprod": "cross-env BASE_URL=https://iauladech.linkneuroia.com playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}
