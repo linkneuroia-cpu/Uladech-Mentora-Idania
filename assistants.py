@@ -5,7 +5,9 @@ CRUD de asistentes (chatbots públicos por RD) en Postgres, generación del
 token/URL pública, y helpers de sesión/mensajes usados por la ruta pública
 del asistente (ver app.py `/asistente/{token}`).
 """
+import re
 import secrets
+import string
 from typing import Any, Dict, List, Optional, Tuple
 
 import db
@@ -324,30 +326,96 @@ def delete_asistente(asistente_id: int) -> None:
 
 # ── Sesiones y mensajes (usado por la ruta pública) ─────────────────────
 
+# Variables disponibles en las plantillas de saludo/reencuentro (Parte 2).
+SALUDO_VARS = ("nombre", "semana", "tema", "curso")
+_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+# Defaults nuevos para asistentes sin texto propio (el mensaje de referencia
+# pedido por el usuario). Si el curso no tiene semana resuelta, las frases que
+# dependen de {semana}/{tema} se omiten limpiamente (ver _render_saludo_template).
+DEFAULT_MENSAJE_BIENVENIDA = (
+    "¡Hola, {nombre}! Soy tu asistente del curso. Nos corresponde la **Semana {semana}**, donde "
+    "abordamos {tema}. Escribí la pregunta que prefieras y empezamos."
+)
+DEFAULT_MENSAJE_REENCUENTRO = (
+    "¡Hola, {nombre}! Me alegra encontrarte otra vez. Continúo aquí, atenta al curso, dispuesta a "
+    "seguir desde donde nos quedamos o a darte una mano con lo que necesites. ¿Cómo continuamos? "
+    "Nos corresponde la **Semana {semana}**, donde abordamos {tema}. Escribí la pregunta que prefieras "
+    "y empezamos."
+)
+
+
+def has_placeholders(text: Optional[str]) -> bool:
+    return bool(text) and bool(_PLACEHOLDER_RE.search(text))
+
+
+def unknown_placeholders(text: Optional[str]) -> List[str]:
+    """Nombres de placeholder usados en `text` que NO son variables válidas
+    (para avisar en el gestor)."""
+    if not text:
+        return []
+    return sorted({m for m in _PLACEHOLDER_RE.findall(text) if m not in SALUDO_VARS})
+
+
+def render_saludo_template(text: str, values: Dict[str, str]) -> str:
+    """Render seguro de la plantilla: reemplaza {var} por su valor; las
+    variables desconocidas quedan vacías y nunca rompe. Las frases que
+    dependen de una variable SIN valor (p.ej. {semana}/{tema} cuando el curso
+    no tiene fecha de inicio) se omiten limpiamente en vez de imprimir
+    'Semana None'."""
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", text)
+    for var in ("semana", "tema", "curso"):
+        if not values.get(var):
+            pieces = [p for p in pieces if "{" + var + "}" not in p]
+    text = " ".join(p for p in pieces if p.strip())
+
+    class _Safe(dict):
+        def __missing__(self, key):
+            return ""
+
+    try:
+        return string.Formatter().vformat(text, (), _Safe(values)).strip()
+    except Exception:
+        return text.strip()
+
+
 def compose_saludo(
     nombre: str,
     mensaje_bienvenida: Optional[str],
     student_fullname: Optional[str],
     week_info: Optional[Dict[str, Any]] = None,
+    curso: Optional[str] = None,
+    is_reencuentro: bool = False,
 ) -> str:
-    """Arma el saludo inicial (mismo criterio en los 3 lugares que antes lo
-    componían por separado: la página del chat, "Nueva conversación", y
-    ahora también al guardarlo como el primer mensaje real de la sesión).
-    Sin esto el saludo solo se pintaba en el navegador y nunca quedaba en
-    `asistente_mensajes` — al recargar la página o revisar una conversación
-    vieja desde la sidebar, desaparecía.
+    """Arma el saludo (bienvenida o reencuentro). Si el texto configurado usa
+    placeholders ({nombre}/{semana}/{tema}/{curso}) se renderiza como
+    plantilla; si NO tiene ninguno, se mantiene EXACTAMENTE el comportamiento
+    de siempre (prefijo "Hola {nombre}, " + texto + frase de semana) para no
+    cambiar asistentes ya configurados. Si no hay texto propio, se usa el
+    default nuevo (bienvenida o reencuentro según `is_reencuentro`).
 
-    `week_info`: opcional, `{"week_number": int, "topic": str|None}` —
-    calculado por `query_router.get_current_week_summary()` desde la fecha
-    real de inicio del curso (Moodle), nunca inventado. Cuando viene, el
-    saludo engancha directo con "en qué semana va el curso" en vez de un
-    genérico sin contexto — pedido explícito: el saludo debe sentirse
-    conectado a dónde está el estudiante hoy, no una frase de bienvenida
-    fija repetida igual en cualquier semana. Si es None (curso sin fecha de
-    inicio resuelta, o todavía no arrancó), el saludo cae al genérico de
-    siempre, sin inventar una semana."""
+    `week_info`: {"week_number": int, "topic": str|None} calculado desde la
+    fecha real de inicio del curso — nunca inventado."""
+    week_n = (week_info or {}).get("week_number")
+    topic = (week_info or {}).get("topic")
+    values = {
+        "nombre": student_fullname or "",
+        "semana": str(week_n) if week_n else "",
+        "tema": topic or "",
+        "curso": curso or "",
+    }
+
+    text = mensaje_bienvenida
+    if text is None:
+        text = DEFAULT_MENSAJE_REENCUENTRO if is_reencuentro else DEFAULT_MENSAJE_BIENVENIDA
+    if has_placeholders(text):
+        rendered = render_saludo_template(text, values)
+        if rendered:
+            return rendered
+
+    # Compatibilidad: texto sin placeholders -> comportamiento histórico.
     saludo = f"Hola {student_fullname}, " if student_fullname else "Hola, "
-    resto = mensaje_bienvenida or f"soy **{nombre}**. Pregúntame lo que necesites sobre el curso."
+    resto = text or f"soy **{nombre}**. Pregúntame lo que necesites sobre el curso."
     if week_info and week_info.get("week_number"):
         week_n = week_info["week_number"]
         topic = week_info.get("topic")

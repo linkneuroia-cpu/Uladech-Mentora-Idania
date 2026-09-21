@@ -19,6 +19,7 @@ from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
 from strategies.rerank import apply_source_boost, apply_week_boost, _extract_all_week_numbers
 import campos_estructurados
+import moodle_tools as mt
 import query_router
 
 # `rerank_score` es la probabilidad de relevancia del cross-encoder (0-1,
@@ -284,11 +285,28 @@ def annotate_source_match(
     return found
 
 
+def _find_course_map_resource(course_id: Optional[int], reference: str) -> Optional[Dict[str, Any]]:
+    """Busca en el Course Map real (Moodle) un recurso/actividad cuyo nombre
+    coincida con la fuente que pidió el estudiante. Sirve para el caso 1.6:
+    el recurso existe en el aula pero su contenido no está indexado. None si
+    no hay course_id o ningún match razonable (nunca inventa)."""
+    if not course_id or not reference:
+        return None
+    try:
+        matches = mt.find_activity(course_id, reference)
+    except Exception:
+        return None
+    if matches and matches[0].get("score", 0) >= 0.4:
+        return matches[0]
+    return None
+
+
 def build_generation_prompt(
     query: str,
     candidates: List[Dict[str, Any]],
     document_reference: Optional[str] = None,
     requested_source_found: Optional[bool] = None,
+    course_map_match: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Agrupa los candidatos recuperados en bloques [MATERIAL DEL CURSO] /
     [BIBLIOGRAFÍA COMPLEMENTARIA] con citas (filename, diapositiva/minuto/
@@ -335,12 +353,26 @@ def build_generation_prompt(
 
     parts = []
     if document_reference is not None:
-        estado = "SÍ" if requested_source_found else "NO"
-        parts.append(
-            f"[VERIFICACIÓN DE FUENTE SOLICITADA] El estudiante pidió específicamente: "
-            f"\"{document_reference}\". ¿Se encontró un documento real con ese nombre entre "
-            f"las fuentes recuperadas? {estado}."
-        )
+        if not requested_source_found and course_map_match:
+            # Fix 1.6: el recurso NO está indexado pero SÍ existe en el aula
+            # (Course Map real) — se lo damos al modelo con su enlace para
+            # que diga "existe pero todavía no está disponible para
+            # consultar", nunca "no existe".
+            parts.append(
+                f"[VERIFICACIÓN DE FUENTE SOLICITADA] El estudiante pidió específicamente: "
+                f"\"{document_reference}\". No hay contenido indexado de ese documento, PERO existe en el "
+                f"aula virtual como \"{course_map_match.get('name')}\" (enlace real: "
+                f"{course_map_match.get('url')}). Decile al estudiante que ese recurso SÍ existe en el aula "
+                f"(con su enlace) pero que su contenido todavía no está disponible para consultar acá — "
+                f"NUNCA respondas que no existe."
+            )
+        else:
+            estado = "SÍ" if requested_source_found else "NO"
+            parts.append(
+                f"[VERIFICACIÓN DE FUENTE SOLICITADA] El estudiante pidió específicamente: "
+                f"\"{document_reference}\". ¿Se encontró un documento real con ese nombre entre "
+                f"las fuentes recuperadas? {estado}."
+            )
     if curso_blocks:
         parts.append("[MATERIAL DEL CURSO]\n" + "\n\n".join(curso_blocks))
     if biblio_blocks:
@@ -498,9 +530,16 @@ async def answer_query(
     # candidatos son efectivamente esa fuente — ver annotate_source_match().
     document_reference = _extract_document_reference(query)
     requested_source_found = annotate_source_match(candidates, document_reference)
+    # Fix 1.6: si la fuente pedida no está indexada, ver si igual existe en
+    # el aula (Course Map) para responder "existe pero no está disponible".
+    course_map_match = (
+        _find_course_map_resource(course_id, document_reference)
+        if (document_reference is not None and not requested_source_found)
+        else None
+    )
 
     user_prompt = build_generation_prompt(
-        query, candidates, document_reference, requested_source_found
+        query, candidates, document_reference, requested_source_found, course_map_match
     )
     system_prompt = SYSTEM_PROMPT_TEMPLATE
     if extra_system_prompt:

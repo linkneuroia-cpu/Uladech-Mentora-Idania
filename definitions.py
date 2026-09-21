@@ -381,8 +381,12 @@ def _parse_markdown_table_rows(
     rows = []
     for line in body_lines:
         cells = _split_md_row(line)
-        if len(cells) != len(header_cells):
-            continue  # fila con cantidad de columnas reales distinta — se omite, no se adivina
+        if len(cells) > len(header_cells):
+            continue  # más celdas que el header — no se adivina de más
+        # Fix 1.1: tolerar filas con MENOS celdas que el header (ej. la fila
+        # "Total | 100 %" de 2 celdas contra 4 columnas): se rellena con ""
+        # en vez de descartar la fila. Antes se perdía la fila del total.
+        cells = cells + [""] * (len(header_cells) - len(cells))
         row = {h: c for h, c in zip(header_cells, cells)}
         if row:
             rows.append(row)

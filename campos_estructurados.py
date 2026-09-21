@@ -273,6 +273,19 @@ def sync_general_section_fields(collection_name: str, course_id: int) -> Dict[st
     return {"collection": collection_name, "fields_synced": list(fields.keys())}
 
 
+def get_general_section_fields(collection_name: str) -> Dict[str, str]:
+    """{etiqueta_real: valor} de los campos de la sección "General" del aula
+    (source_type='seccion_general', ver sync_general_section_fields) — p.ej.
+    {'DOCENTE': 'Dr. ...', 'CORREO': '...', 'HORARIO': '...'}. {} si no hay
+    ninguno cargado (nunca inventa)."""
+    rows = db.fetch_all(
+        f"SELECT field_raw, value_raw FROM {TABLE_NAME} "
+        "WHERE qdrant_collection_name = %s AND source_type = 'seccion_general'",
+        (collection_name,),
+    )
+    return {r["field_raw"]: r["value_raw"] for r in rows if r["field_raw"]}
+
+
 def rebuild_index(collection_name: str) -> Dict[str, Any]:
     """Reconstruye el índice de una colección: borra sus filas actuales y
     vuelve a extraer desde los chunks tabla/table_row que YA están en
@@ -1226,6 +1239,19 @@ def get_table_rows(
             ORDER BY document_filename, row_id""",
         tuple(params),
     )
+
+    # Fix 1.3: ordenar por el número REAL de tabla/fila (`...::pt{N}::r{M}`),
+    # no alfabéticamente por row_id (donde 'pt1393' iría antes que 'pt482').
+    # Así el orden de las filas es lógico y estable entre respuestas.
+    def _row_sort_key(r: Dict[str, Any]):
+        m = re.search(r"::pt(\d+)::r(\d+)$", r["row_id"] or "")
+        return (
+            r["document_filename"],
+            int(m.group(1)) if m else 10 ** 9,
+            int(m.group(2)) if m else 10 ** 9,
+        )
+
+    rows = sorted(rows, key=_row_sort_key)
 
     # Agrupar por FILA LÓGICA = document_filename + row_id COMPLETO (con el
     # sufijo '::rN'). A diferencia de count_distinct (que agrupa con

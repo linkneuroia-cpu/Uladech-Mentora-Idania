@@ -1106,8 +1106,10 @@ async def asistente_chat_page(
 
     reencuentro = None
     if tenia_historial:
-        resto_reencuentro = asistente.get("mensaje_reencuentro") or "¡qué bueno verte de nuevo! Seguimos donde lo dejamos."
-        reencuentro = assistants.compose_saludo(asistente["nombre"], resto_reencuentro, fullname, week_info)
+        reencuentro = assistants.compose_saludo(
+            asistente["nombre"], asistente.get("mensaje_reencuentro"), fullname, week_info,
+            is_reencuentro=True,
+        )
 
     return templates.TemplateResponse(
         "asistente_chat.html",
@@ -1595,6 +1597,43 @@ async def auto_preview(
         return AutoCore.preview_course(curid, collection_name, model_name=resolved_model)
     except Exception as e:
         raise HTTPException(502, f"Error consultando Moodle: {e}")
+
+
+@app.get("/api/cobertura", tags=["Automático"])
+async def cobertura_report(
+    curid: int = Query(..., description="ID del curso en Moodle"),
+    collection_name: str = Query(..., description="Colección destino"),
+):
+    """Reporte de COBERTURA (fix 1.6): recursos/actividades que EXISTEN en el
+    aula (Moodle) pero cuyo contenido todavía NO está vectorizado en la
+    colección. Reutiliza AutoCore.preview_course(), que ya marca cada
+    archivo con is_duplicate (presente en Qdrant o no) — no se construye
+    nada nuevo. Sirve para que el gestor muestre qué falta indexar."""
+    loop = asyncio.get_event_loop()
+    try:
+        preview = await loop.run_in_executor(
+            None, lambda: AutoCore.preview_course(curid, collection_name)
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Error consultando Moodle: {e}")
+
+    faltantes = []
+    for m in preview.get("modules", []):
+        for f in m["files"]:
+            if not f.get("is_duplicate"):
+                faltantes.append({
+                    "module_name": m["module_name"],
+                    "filename": f["filename"],
+                    "fileurl": f.get("fileurl"),
+                    "file_type": f.get("file_type"),
+                })
+    return {
+        "curid": curid,
+        "collection_name": collection_name,
+        "total_recursos": preview.get("total_files"),
+        "sin_vectorizar": len(faltantes),
+        "faltantes": faltantes,
+    }
 
 
 @app.post("/api/auto/download-validate", tags=["Automático"])
@@ -2129,7 +2168,11 @@ async def rag_answer(req: RagAnswerRequest):
 # un nginx compartido con otras funcionalidades (ver settings.py); sin
 # prefijo (desarrollo local) sirve directo en la raíz, sin envoltorio.
 if settings.resolved_url_prefix:
-    asgi_app = FastAPI(title=settings.API_TITLE)
+    # Fix 3.4: el wrapper recibe el MISMO lifespan — uvicorn levanta asgi_app,
+    # y el lifespan de una app MONTADA no corre solo. Sin esto, con URL_PREFIX
+    # configurado no se ejecutaban bootstrap_admin()/validate_settings()/
+    # credentials.load_all_into_settings()/el scheduler (bug real).
+    asgi_app = FastAPI(title=settings.API_TITLE, lifespan=lifespan)
     asgi_app.mount(settings.resolved_url_prefix, app)
 else:
     asgi_app = app

@@ -2408,16 +2408,39 @@ function asisEditCursoHTML(){
     <button class="btn btn-out btn-sm" onclick='closeModal();showMod("rd");rdLoad();rdCourses(${a.rd_id})'>Abrir cursos de "${esc(rd?rd.nombre:'')}" →</button>`;
 }
 
+const SALUDO_VARS=['nombre','semana','tema','curso'];
+function saludoUnknownPlaceholders(t){
+  const m=(t||'').match(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g)||[];
+  const names=[...new Set(m.map(x=>x.slice(1,-1)))];
+  return names.filter(n=>!SALUDO_VARS.includes(n));
+}
+function saludoPreview(t){
+  const vals={nombre:'Ana Pérez',semana:'3',tema:'Fundamentos filosóficos y finalidades educativas',curso:'Filosofía de la Educación'};
+  return (t||'').replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g,(_,k)=>(k in vals)?vals[k]:'');
+}
+function asisSaludoUpdate(which){
+  const ta=$(which==='saludo'?'edit-saludo':'edit-reencuentro');
+  const warn=$('edit-'+which+'-warn'); const prev=$('edit-'+which+'-prev');
+  if(!ta) return;
+  const unk=saludoUnknownPlaceholders(ta.value);
+  if(warn) warn.textContent = unk.length ? ('⚠️ Placeholder(s) desconocido(s): '+unk.map(u=>'{'+u+'}').join(', ')) : '';
+  if(prev) prev.textContent = ta.value.trim() ? ('Vista previa: '+saludoPreview(ta.value)) : '';
+}
 function asisEditPromptHTML(){
+  const varsHint='Variables: <code>{nombre}</code> (alumno), <code>{semana}</code>, <code>{tema}</code>, <code>{curso}</code>. Si el texto no usa ninguna, se mantiene el saludo clásico ("Hola [alumno], " + texto + semana).';
   return `<div class="fg"><label class="fl">Prompt maestro</label><textarea class="fc" id="edit-prompt" rows="5">${esc(ASIS_EDIT.data.prompt_maestro||'')}</textarea>
     <div class="fh">Se agrega al prompt del sistema fijo — no lo reemplaza.</div></div>
-  <div class="fg"><label class="fl">Mensaje de bienvenida <span class="muted">— opcional</span></label>
-    <textarea class="fc" id="edit-saludo" rows="3" placeholder="Ej: soy IdanIA. Pregúntame lo que necesites sobre el curso.">${esc(ASIS_EDIT.data.mensaje_bienvenida||'')}</textarea>
-    <div class="fh">Se muestra al abrir el chat, después de "Hola [nombre del alumno], ". Déjalo vacío para usar el mensaje por defecto ("soy ${esc(ASIS_EDIT.data.nombre)}. Pregúntame lo que necesites sobre el curso.").</div>
+  <div class="fg"><label class="fl">Mensaje de bienvenida <span class="muted">— opcional (plantilla)</span></label>
+    <textarea class="fc" id="edit-saludo" rows="3" oninput="asisSaludoUpdate('saludo')" placeholder="Ej: ¡Hola, {nombre}! Soy IdanIA. Nos corresponde la Semana {semana}, donde abordamos {tema}.">${esc(ASIS_EDIT.data.mensaje_bienvenida||'')}</textarea>
+    <div class="fh">Se muestra al abrir el chat. ${varsHint} Déjalo vacío para el mensaje por defecto.</div>
+    <div class="fh" id="edit-saludo-warn" style="color:#b45309"></div>
+    <div class="fh" id="edit-saludo-prev" style="border-left:3px solid #ddd;padding-left:8px"></div>
   </div>
-  <div class="fg"><label class="fl">Mensaje de reencuentro <span class="muted">— opcional</span></label>
-    <textarea class="fc" id="edit-reencuentro" rows="3" placeholder="Ej: ¡qué bueno verte de nuevo! Seguimos donde lo dejamos.">${esc(ASIS_EDIT.data.mensaje_reencuentro||'')}</textarea>
-    <div class="fh">Se muestra (no se guarda) al reabrir una conversación con historial.</div>
+  <div class="fg"><label class="fl">Mensaje de reencuentro <span class="muted">— opcional (plantilla)</span></label>
+    <textarea class="fc" id="edit-reencuentro" rows="3" oninput="asisSaludoUpdate('reencuentro')" placeholder="Ej: ¡Hola, {nombre}! Me alegra encontrarte otra vez. Nos corresponde la Semana {semana}, donde abordamos {tema}.">${esc(ASIS_EDIT.data.mensaje_reencuentro||'')}</textarea>
+    <div class="fh">Se muestra (no se guarda) al reabrir una conversación con historial. ${varsHint}</div>
+    <div class="fh" id="edit-reencuentro-warn" style="color:#b45309"></div>
+    <div class="fh" id="edit-reencuentro-prev" style="border-left:3px solid #ddd;padding-left:8px"></div>
   </div>
   <div class="fg"><label class="fl">Máximo de preguntas por conversación</label>
     <input class="fc" type="number" id="edit-max-act" value="${ASIS_EDIT.data.max_actividades_sesion||10}" min="1" style="max-width:140px">

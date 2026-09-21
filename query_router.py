@@ -18,6 +18,7 @@ evidencia de que hace falta sería sobre-ingeniería)."""
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import campos_estructurados as ce
@@ -170,6 +171,16 @@ _DUE_DATES_RE = re.compile(
     r"|fechas?\s+de\s+(entrega|vencimiento)",
     re.IGNORECASE,
 )
+# "¿quién es el profesor/docente?" / "¿cuál es el correo/horario?" — datos
+# de la sección General del aula (seccion_general). Bug real: la pregunta
+# decía "profesor" y el campo se llama "docente", así que el matching léxico
+# de detect_field() daba 0 coincidencias y respondía "no encontré".
+_TEACHER_INFO_RE = re.compile(
+    r"\b(docente|profesor(es|a)?|maestro|tutor|tutora|"
+    r"qui[eé]n\s+(dicta|ense[ñn]a|da\s+el\s+curso|est[aá]\s+a\s+cargo))\b"
+    r"|\b(correo|contacto|horario|a\s+qu[eé]\s+hora)\b",
+    re.IGNORECASE,
+)
 
 
 def _classify(query: str) -> Optional[Dict[str, Any]]:
@@ -208,7 +219,8 @@ def _classify(query: str) -> Optional[Dict[str, Any]]:
     # semana" (que dispararía CURRENT_WEEK) pero en realidad pregunta por
     # fechas de entrega — ver _DUE_DATES_RE.
     if _DUE_DATES_RE.search(query):
-        return {"intent": "DUE_DATES"}
+        week_m = _WEEK_NUMBER_RE.search(query)
+        return {"intent": "DUE_DATES", "section_number": int(week_m.group(1)) if week_m else None}
 
     if _CURRENT_WEEK_RE.search(query):
         return {"intent": "CURRENT_WEEK"}
@@ -226,6 +238,9 @@ def _classify(query: str) -> Optional[Dict[str, Any]]:
     if _STUDY_HELP_RE.search(query):
         week_m = _WEEK_NUMBER_RE.search(query)
         return {"intent": "STUDY_HELP", "section_number": int(week_m.group(1)) if week_m else None}
+
+    if _TEACHER_INFO_RE.search(query):
+        return {"intent": "TEACHER_INFO"}
 
     if _SCHEDULE_RE.search(query):
         return {"intent": "SCHEDULE"}
@@ -606,33 +621,116 @@ def _format_grades_evidence(course_id: int, user_id: int) -> Dict[str, Any]:
     return _wrap_as_candidate(text=text, filename="Calificaciones del estudiante (Moodle)", section_name="Calificaciones")
 
 
+def _parse_ponderacion(value: Any) -> Optional[float]:
+    """'20 %' -> 20.0 ; None si no hay número parseable."""
+    if value is None:
+        return None
+    m = re.search(r"\d+(?:[.,]\d+)?", str(value))
+    if not m:
+        return None
+    return float(m.group(0).replace(",", "."))
+
+
+def _is_total_row(row: Dict[str, Any]) -> bool:
+    """True si la fila ya es un "Total" del propio sílabo (para no duplicarla
+    con el Total calculado)."""
+    for k in ("componente", "evidencia evaluable", "instrumento"):
+        v = (row.get(k) or "").strip().lower()
+        if v.startswith("total"):
+            return True
+    return False
+
+
 def _format_evaluation_criteria_evidence(collection_name: str) -> Optional[Dict[str, Any]]:
     """Cuadro REAL de "Evidencias evaluables, instrumentos y ponderación"
     del sílabo (ver A.1 del plan) — determinista, desde el índice
-    estructurado. Antes esto solo existía como instrucción de prompt ("si
-    el material recuperado trae la nota mínima, priorizala"), que dependía
-    de que RAG trajera el chunk correcto. Nunca arma una columna "Unidad"
-    que la fuente no trae por fila."""
+    estructurado. Incluye la columna "Componente" (nombre corto, ej.
+    'U1-AF-Actividad formativa 1') cuando el sílabo la trae, las filas
+    numeradas y en orden estable, y una fila **Total** calculada (avisando
+    si la suma no da 100 %)."""
     rows = ce.get_table_rows(
-        collection_name, ["evidencia evaluable", "instrumento", "ponderacion"],
+        collection_name,
+        ["componente", "evidencia evaluable", "instrumento", "ponderacion"],
     )
     if not rows:
         return None
-    table_rows = [
-        [r.get("evidencia evaluable"), r.get("instrumento"), r.get("ponderacion")]
-        for r in rows
-    ]
+    data_rows = [r for r in rows if not _is_total_row(r)]
+    if not data_rows:
+        return None
+
+    has_componente = any((r.get("componente") or "").strip() for r in data_rows)
+    total = 0.0
+    total_known = True
+    for r in data_rows:
+        p = _parse_ponderacion(r.get("ponderacion"))
+        if p is None:
+            total_known = False
+        else:
+            total += p
+
+    headers = ["#"]
+    if has_componente:
+        headers.append("Componente")
+    headers += ["Evidencia evaluable", "Instrumento", "Ponderación"]
+
+    table_rows: List[List[Any]] = []
+    for i, r in enumerate(data_rows, start=1):
+        row = [i]
+        if has_componente:
+            row.append(r.get("componente"))
+        row += [r.get("evidencia evaluable"), r.get("instrumento"), r.get("ponderacion")]
+        table_rows.append(row)
+
+    total_cell = f"{total:g} %" if total_known else "?"
+    total_row = [""]
+    if has_componente:
+        total_row.append("")
+    total_row += ["Total", "", total_cell]
+    table_rows.append(total_row)
+
     lines = [
         "Cuadro REAL de evidencias evaluables, instrumentos y ponderación del sílabo (tal cual está indexado):",
-        _md_table(["Evidencia evaluable", "Instrumento", "Ponderación"], table_rows),
-        "IMPORTANTE: presentá esta tabla tal cual, con estas tres columnas y estas filas. No agregues ni "
-        "inventes una columna 'Unidad' si la fuente no la trae explícita por fila, no omitas filas ni "
-        "inventes ponderaciones. Mantené el formato de tabla en tu respuesta, no lo reescribas como viñetas.",
+        _md_table(headers, table_rows),
+        "IMPORTANTE: presentá esta tabla tal cual, con estas columnas y estas filas, EN ESTE ORDEN "
+        "(la columna '#' numera el orden) y sin omitir ninguna fila. No agregues ni inventes columnas "
+        "('Unidad' u otras) que no estén arriba, y no inventes ponderaciones. La última fila es el Total "
+        "(suma de las ponderaciones). Mantené el formato de tabla en tu respuesta, no lo reescribas como viñetas.",
     ]
+    if total_known and abs(total - 100.0) > 0.01:
+        lines.append(
+            f"ATENCIÓN: la suma de las ponderaciones da {total:g} % (no 100 %) — puede faltar alguna fila "
+            "en el material indexado. Mencioná esta suma real, no la corrijas a 100 por tu cuenta."
+        )
     return _wrap_as_candidate(
         text="\n".join(lines),
         filename="Sílabo — Evidencias evaluables",
         section_name="Evidencias evaluables, instrumentos y ponderación",
+    )
+
+
+def _format_teacher_info_evidence(collection_name: str) -> Optional[Dict[str, Any]]:
+    """"¿Quién es el docente?" / correo / horario — datos REALES de la
+    sección General del aula (source_type='seccion_general'). Degrada de
+    forma honesta si no están cargados; nunca inventa el nombre."""
+    fields = ce.get_general_section_fields(collection_name)
+    if not fields:
+        text = (
+            "No tengo cargado el dato del docente/contacto de este curso. No lo inventes: decile al "
+            "estudiante que revise la sección General del aula virtual."
+        )
+        return _wrap_as_candidate(
+            text=text, filename="Datos del curso (Moodle)", section_name="No disponible",
+        )
+    rows = [[k, v] for k, v in fields.items()]
+    lines = [
+        "Datos REALES de docencia/contacto del curso (sección General del aula):",
+        _md_table(["Dato", "Valor"], rows),
+        "IMPORTANTE: usá exactamente estos valores, sin inventar ni completar. Si el estudiante pregunta "
+        "por el docente/profesor, respondé con el valor de la fila DOCENTE; si pregunta por correo, "
+        "contacto u horario, la fila correspondiente.",
+    ]
+    return _wrap_as_candidate(
+        text="\n".join(lines), filename="Datos del curso (Moodle)", section_name="Docente y contacto",
     )
 
 
@@ -688,10 +786,20 @@ def _format_study_help_evidence(
     )
 
 
-def _format_due_dates_evidence(course_id: int) -> Optional[Dict[str, Any]]:
+def _due_date_state(due_epoch: int, now_epoch: int) -> str:
+    return "vencida" if due_epoch < now_epoch else "próxima"
+
+
+def _format_due_dates_evidence(
+    course_id: int, section_number: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     """"¿Cuándo vence...?" — fechas REALES de entrega (mdl_event vía
-    moodle_calendar). Si no hay fuente disponible, degrada de forma honesta
-    y NUNCA inventa una fecha (Parte C del plan)."""
+    moodle_calendar). Si `section_number` (o, si no, la semana actual por
+    fecha) está resuelto, filtra a ESA semana real (rango startdate+7·(N-1)
+    … +7 días), ordena por fecha ascendente y marca cada fila como vencida/
+    próxima. Si no hay vencimientos en la semana, lo dice y ofrece el
+    listado completo — NUNCA devuelve todo el curso como si fuera de esa
+    semana. Si no hay fuente, degrada honestamente y no inventa fechas."""
     result = mc.get_due_dates(course_id)
     if result.get("status") == "unavailable":
         text = (
@@ -702,17 +810,58 @@ def _format_due_dates_evidence(course_id: int) -> Optional[Dict[str, Any]]:
         return _wrap_as_candidate(text=text, filename="Fechas de entrega (Moodle)", section_name="No disponible")
     if result.get("status") != "confident":
         return None
-    rows = [[e["name"], e["due_date"]] for e in result["events"]]
+
+    events = sorted(result["events"], key=lambda e: e["due_epoch"])
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+
+    def _render(evs: List[Dict[str, Any]]) -> List[List[str]]:
+        return [[e["name"], e["due_date"], _due_date_state(e["due_epoch"], now_epoch)] for e in evs]
+
+    # Resolver semana objetivo: explícita o la actual por fecha real.
+    week_n = section_number
+    if week_n is None:
+        current = cm.get_current_week_number(course_id)
+        if current.get("status") == "confident":
+            week_n = current["week_number"]
+
+    scope_events = events
+    scope_label = "el curso"
+    week_range_txt = ""
+    if week_n is not None:
+        dates = cm.get_course_dates(course_id)
+        if dates.get("status") == "confident":
+            start = datetime.fromtimestamp(dates["startdate_epoch"], tz=timezone.utc)
+            week_start = start + timedelta(days=7 * (week_n - 1))
+            week_end = week_start + timedelta(days=7)
+            lo, hi = int(week_start.timestamp()), int(week_end.timestamp())
+            scope_events = [e for e in events if lo <= e["due_epoch"] < hi]
+            scope_label = f"la Semana {week_n}"
+            week_range_txt = f" (del {cm._format_date_es(lo)} al {cm._format_date_es(hi - 1)})"
+
+    if not scope_events:
+        lines = [
+            f"Según Moodle, no hay vencimientos de actividades en {scope_label}{week_range_txt}.",
+            "Vencimientos del curso completo (por si el estudiante quiere verlos):",
+            _md_table(["Actividad", "Vence", "Estado"], _render(events)),
+            "IMPORTANTE: aclarale al estudiante que NO hay vencimientos esa semana; el listado de arriba "
+            "es del curso completo, no de esa semana. No inventes fechas.",
+        ]
+        return _wrap_as_candidate(
+            text="\n".join(lines),
+            filename="Fechas de entrega (Moodle)",
+            section_name=f"Vencimientos — {scope_label}",
+        )
+
     lines = [
-        "Fechas REALES de vencimiento de las actividades del curso (según Moodle):",
-        _md_table(["Actividad", "Vence"], rows),
-        "IMPORTANTE: usá exactamente estas fechas, sin inventar ni ajustar ninguna. Mantené el formato "
-        "de tabla en tu respuesta.",
+        f"Fechas REALES de vencimiento en {scope_label}{week_range_txt} (según Moodle), ordenadas por fecha:",
+        _md_table(["Actividad", "Vence", "Estado"], _render(scope_events)),
+        "IMPORTANTE: usá exactamente estas fechas y este orden, sin inventar ni ajustar ninguna. La columna "
+        "'Estado' marca si ya venció o está próxima. Mantené el formato de tabla en tu respuesta.",
     ]
     return _wrap_as_candidate(
         text="\n".join(lines),
         filename="Fechas de entrega (Moodle)",
-        section_name="Vencimientos del curso",
+        section_name=f"Vencimientos — {scope_label}",
     )
 
 
@@ -769,6 +918,9 @@ def route(
     if parsed["intent"] == "EVALUATION_CRITERIA":
         return _format_evaluation_criteria_evidence(collection_name)
 
+    if parsed["intent"] == "TEACHER_INFO":
+        return _format_teacher_info_evidence(collection_name)
+
     if not course_id:
         return None
 
@@ -777,7 +929,7 @@ def route(
             return _format_study_help_evidence(collection_name, course_id, parsed.get("section_number"))
 
         if parsed["intent"] == "DUE_DATES":
-            return _format_due_dates_evidence(course_id)
+            return _format_due_dates_evidence(course_id, parsed.get("section_number"))
 
         if parsed["intent"] == "PROGRESS":
             if not user_id:
