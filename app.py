@@ -147,12 +147,19 @@ async def auth_gate(request: Request, call_next):
 app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY, same_site="lax")
 
 
-Path("frontend").mkdir(exist_ok=True)
-templates = Jinja2Templates(directory="frontend")
+# Rutas ABSOLUTAS (ancladas a este archivo), no relativas al cwd del
+# proceso: una relativa como "frontend" se rompe si algo (p.ej. pix2tex,
+# ver _call_preserving_cwd en definitions.py) hace os.chdir() en medio de
+# una request concurrente — bug real reproducido en preproducción, tumbó
+# el login del gestor para todo el proceso mientras corría una
+# vectorización.
+_APP_DIR = Path(__file__).resolve().parent
+(_APP_DIR / "frontend").mkdir(exist_ok=True)
+templates = Jinja2Templates(directory=str(_APP_DIR / "frontend"))
 templates.env.globals["URL_PREFIX"] = settings.resolved_url_prefix
 
-Path("img").mkdir(exist_ok=True)
-app.mount("/img", StaticFiles(directory="img"), name="img")
+(_APP_DIR / "img").mkdir(exist_ok=True)
+app.mount("/img", StaticFiles(directory=str(_APP_DIR / "img")), name="img")
 
 
 # ═══════════════════════════════════════════════════════════════════

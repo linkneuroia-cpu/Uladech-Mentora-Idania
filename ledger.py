@@ -175,3 +175,19 @@ def list_curso_archivos(collection_name: str) -> List[Dict[str, Any]]:
         "SELECT * FROM curso_archivos WHERE qdrant_collection_name=%s ORDER BY filename",
         (collection_name,),
     )
+
+
+def get_indexed_filename(collection_name: str, resource_id: int) -> Optional[str]:
+    """Dado el cmid real de un recurso de Moodle (`resource_id`), devuelve el
+    nombre de archivo REAL bajo el que quedó indexado en esta colección, si
+    ya está vectorizado. None si no hay fila o todavía no se vectorizó —
+    nunca inventa un nombre. Permite resolver el cruce cmid -> archivo
+    indexado sin depender de matching difuso de texto (ver Fix del Course
+    Map: el nombre del RECURSO en Moodle puede ser totalmente distinto del
+    nombre del ARCHIVO subyacente)."""
+    row = db.fetch_one(
+        "SELECT filename FROM curso_archivos WHERE qdrant_collection_name=%s AND resource_id=%s "
+        "AND estado='vectorizado' LIMIT 1",
+        (collection_name, resource_id),
+    )
+    return row["filename"] if row else None

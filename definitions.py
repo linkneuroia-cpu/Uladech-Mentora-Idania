@@ -7,6 +7,7 @@ automático y de actualización.
 """
 
 # ──────────────────────────── IMPORTS ────────────────────────────
+import os
 import re
 import io
 import hashlib
@@ -523,6 +524,24 @@ def _looks_like_plausible_formula(latex: str) -> bool:
     return True
 
 
+def _call_preserving_cwd(fn, *args, **kwargs):
+    """pix2tex cambia el directorio de trabajo del PROCESO (`os.chdir`) al
+    cargar su modelo y, según se confirmó en vivo (bug real reproducido en
+    preprocucción: `/proc/1/cwd` quedó apuntando dentro de
+    `site-packages/pix2tex/model` en medio de una vectorización, rompiendo
+    `Jinja2Templates(directory="frontend")` — de ruta relativa — para TODO
+    el proceso, incluido el login del gestor), no siempre lo restaura al
+    terminar. Como el server corre en un solo proceso (sin workers
+    separados), ese chdir afecta a cualquier otra request concurrente. Se
+    envuelve cada llamada a pix2tex guardando y restaurando el cwd real,
+    pase lo que pase adentro."""
+    cwd = os.getcwd()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        os.chdir(cwd)
+
+
 def _get_latex_ocr():
     """LaTeX-OCR (pix2tex): modelo especializado en imagen-de-fórmula ->
     LaTeX real, 100% local (descarga los pesos una sola vez, después corre
@@ -549,7 +568,7 @@ def _get_latex_ocr():
             "no_cuda": not use_gpu,
             "no_resize": False,
         })
-        _latex_ocr_model = LatexOCR(arguments)
+        _latex_ocr_model = _call_preserving_cwd(LatexOCR, arguments)
     return _latex_ocr_model
 
 
@@ -587,7 +606,7 @@ async def _ocr_page_region(fitz_page, bbox: Tuple[float, float, float, float]) -
             from PIL import Image
             latex_model = await loop.run_in_executor(None, _get_latex_ocr)
             img = Image.open(tmp_path)
-            latex = await loop.run_in_executor(None, lambda: latex_model(img))
+            latex = await loop.run_in_executor(None, lambda: _call_preserving_cwd(latex_model, img))
             latex = (latex or "").strip()
             if latex and _looks_like_plausible_formula(latex):
                 return f"\\( {latex} \\)"

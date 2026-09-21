@@ -19,6 +19,7 @@ from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
 from strategies.rerank import apply_source_boost, apply_week_boost, _extract_all_week_numbers
 import campos_estructurados
+import ledger
 import moodle_tools as mt
 import query_router
 
@@ -179,7 +180,12 @@ _DOC_TYPE_WORDS = (
 )
 _DOC_REFERENCE_RE = re.compile(
     r"\b(?:el|la|los|las|del|de la)\s+(" + "|".join(_DOC_TYPE_WORDS) + r")\b"
-    r"(?:\s+(?:de|del|de la|sobre))?\s*([a-záéíóúñ0-9][^?.,;:]{2,60})?",
+    # ':' se permite dentro del tema: muchos títulos reales usan
+    # "Tipo: Tema puntual" (ej. "Artículo científico: Evolución de la
+    # Odontología") — si se excluye, el tema queda truncado justo antes de
+    # la parte más específica del nombre, y el matching de más abajo (tanto
+    # contra Qdrant como contra el Course Map) se vuelve ambiguo.
+    r"(?:\s+(?:de|del|de la|sobre))?\s*([a-záéíóúñ0-9][^?.,;]{2,60})?",
     re.IGNORECASE,
 )
 # Mención literal de un archivo por nombre (ej. "TESIS.pdf", "el archivo
@@ -283,6 +289,55 @@ def annotate_source_match(
         c["source_match"] = matches
         found = found or matches
     return found
+
+
+async def _fetch_candidates_for_known_filename(
+    collection_name: str, filename: str, query: str, top_n: int = 6,
+) -> List[Dict[str, Any]]:
+    """Cuando ya se confirmó (cruce cmid -> archivo real de curso_archivos,
+    ver Fix del Course Map) que un documento puntual es el que pidió el
+    estudiante, pero la búsqueda semántica normal no lo trajo entre los
+    candidatos (pasa cuando la pregunta usa palabras genéricas — "ideas
+    principales", "personajes relevantes" — que no matchean bien el
+    contenido puntual del archivo), se traen sus chunks reales
+    DIRECTAMENTE por nombre de archivo (no por similitud) y se rerankean
+    contra la pregunta para quedarnos solo con los más relevantes. Así el
+    modelo tiene contenido real para responder en vez de un documento
+    confirmado pero vacío de contexto. [] si el documento no tiene chunks
+    con texto (nunca inventa)."""
+    admin = get_qdrant_admin()
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, lambda: admin.get_document_chunks(collection_name, filename)
+        )
+    except Exception:
+        return []
+    raw_chunks = [c for c in (result.get("chunks") or []) if (c.get("text") or "").strip()]
+    if not raw_chunks:
+        return []
+    candidates = [
+        {
+            "id": None,
+            "score": 0.0,
+            "text": c.get("text") or "",
+            "payload": {
+                "filename": filename,
+                "chunk": c.get("chunk"),
+                "chunk_type": c.get("chunk_type"),
+                "contextual_header": c.get("contextual_header"),
+                "page": c.get("page"),
+                "section_name": c.get("section_name"),
+                "source_type": c.get("source_type"),
+                "slide_number": c.get("slide_number"),
+                "start_time": c.get("start_time"),
+                "end_time": c.get("end_time"),
+            },
+        }
+        for c in raw_chunks
+    ]
+    reranker = strategy_registry.get_rerank_strategy()
+    return await reranker.rerank(query, candidates, top_n=min(top_n, len(candidates)))
 
 
 def _find_course_map_resource(course_id: Optional[int], reference: str) -> Optional[Dict[str, Any]]:
@@ -542,6 +597,33 @@ async def answer_query(
         if (document_reference is not None and not requested_source_found)
         else None
     )
+    # Fix (cmid -> archivo real): el nombre del RECURSO en Moodle puede ser
+    # totalmente distinto del nombre del ARCHIVO indexado (ver caso real:
+    # recurso "Artículo científico: Evolución de la Odontología" cuyo
+    # archivo real es "ARTÍCULO CIENTÍFICO.pdf") — el matching difuso de
+    # texto entre ambos puede fallar aunque el contenido SÍ esté vectorizado.
+    # Si el Course Map ya resolvió un cmid real, usamos el cruce exacto que
+    # ya tenemos en curso_archivos (cmid -> archivo indexado) en vez de
+    # seguir dependiendo del texto — así se evita el fallback "no pude
+    # confirmar" cuando en realidad el documento SÍ es el mismo indexado.
+    if course_map_match is not None:
+        resolved_filename = ledger.get_indexed_filename(collection_name, course_map_match["cmid"])
+        if resolved_filename is not None:
+            already_retrieved = any(
+                (c.get("payload", {}).get("filename") or "") == resolved_filename for c in candidates
+            )
+            if not already_retrieved:
+                # La búsqueda semántica normal no trajo este documento (pasa
+                # con preguntas de frase genérica) — se trae directamente por
+                # nombre, ya que confirmamos con certeza (cmid real) que es
+                # el archivo pedido.
+                injected = await _fetch_candidates_for_known_filename(collection_name, resolved_filename, query)
+                candidates = injected + candidates
+            for c in candidates:
+                if (c.get("payload", {}).get("filename") or "") == resolved_filename:
+                    c["source_match"] = True
+            requested_source_found = True
+            course_map_match = None
 
     user_prompt = build_generation_prompt(
         query, candidates, document_reference, requested_source_found, course_map_match
