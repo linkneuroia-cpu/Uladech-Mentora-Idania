@@ -1,0 +1,43 @@
+name: Pruebas unitarias
+
+# `app.py` carga el stack de ML completo (torch/easyocr/fastembed) ya con
+# el simple "import app" — no hay forma liviana de correr estas pruebas
+# sin instalar requirements.txt entero. Es lento (varios minutos) a
+# propósito: es el mismo costo real de construir la imagen de producción,
+# no algo que la CI agregue.
+on:
+  push:
+    branches: ["feature/**", "fix/**", "hotfix/**", "develop", "main"]
+  pull_request:
+    branches: ["develop", "main"]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Librerias de sistema (OpenCV/EasyOCR/audio-video)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 ffmpeg
+
+      - name: Cache de pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+
+      - name: Instalar dependencias (incluye pytest)
+        run: pip install -r requirements-dev.txt
+
+      # Las pruebas de tests/test_*.py mockean DB/Moodle/Qdrant (ver sus
+      # docstrings) — no se conectan a ningún servicio real, así que no
+      # hace falta ningún secreto en este workflow.
+      - name: pytest (sin tests/e2e — esos son Playwright, no pytest)
+        run: pytest tests/ --ignore=tests/e2e -q

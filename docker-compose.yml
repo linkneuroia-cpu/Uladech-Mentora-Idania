@@ -6,6 +6,12 @@
 services:
   app:
     build: .
+    # Tag con el SHA corto del commit desplegado (lo exporta
+    # deploy/deploy_git.sh antes de `docker compose build`) — permite
+    # volver a una versión anterior reconstruyendo ese mismo commit en vez
+    # de perder la imagen anterior bajo ":latest". Sin la variable (deploy
+    # manual), cae a ":latest" como antes.
+    image: gestor-app:${IMAGE_TAG:-latest}
     container_name: gestor_f1
     network_mode: host
     env_file:

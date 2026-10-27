@@ -1,0 +1,5 @@
+# Dependencias solo para desarrollo/CI (no se instalan en la imagen de
+# producción — ver Dockerfile). `pytest` corre los 7 archivos
+# tests/test_*.py (mockean DB/Moodle/Qdrant, ver sus propios docstrings).
+-r requirements.txt
+pytest==8.3.3

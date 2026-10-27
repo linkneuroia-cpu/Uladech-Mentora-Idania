@@ -60,7 +60,9 @@ services:
 
   app:
     build: .
-    image: projects/f1-idania:latest
+    # Mismo criterio que docker-compose.yml de producción: tag con el SHA
+    # corto del commit desplegado, exportado por deploy/deploy_git.sh.
+    image: projects/f1-idania:${IMAGE_TAG:-latest}
     container_name: f1_idania_app
     restart: unless-stopped
     env_file:
