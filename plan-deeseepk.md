@@ -228,3 +228,29 @@ separado, una vez que confirmen el punto 2.
 - [ ] Commit creado siguiendo el flujo de ramas, sin secretos.
 - [ ] Push a `idania` (`main`, `develop` y la rama de la tarea).
 - [ ] Ningún despliegue real ejecutado sin que Miguel lo pida.
+
+## Resultado de la ejecución (2026-10-27)
+
+- Suite completa: `pytest tests/ --ignore=tests/e2e -q` -> 61/61 en verde.
+- Commit `e6df77f` subido a `idania` en `main`, `develop` y
+  `fix/secureurl-moodle-idania` (sin `.env` ni secretos en el diff).
+- Verificación manual local: `/login` sin token -> 200; token de chat en
+  `/login` -> 403; token de gestor -> 303 (sin 403; el 503 de cursos es
+  esperado en local); CSP `frame-ancestors
+  https://moodle5.linkneuroia.com` presente; `/asistente/{token}` canjea
+  el token (303) y sin token en la sesión -> 403.
+- Destino confirmado por Miguel: **preproducción** (`80.190.77.138`,
+  `https://iauladech.linkneuroia.com`, TLS real vía Traefik). Se agregaron
+  al `.env` de ESE servidor (no al repo): `SECUREURL_APP_ID=f1`,
+  `SECUREURL_KEYS=<misma clave real>`, `MOODLE_FRAME_ANCESTOR`,
+  `SESSION_SAMESITE=none`, `SESSION_HTTPS_ONLY=true`. La clave se verificó
+  byte a byte contra la local; backup en `.env.bak.secureurl`.
+- **No** se ejecutó ningún deploy ni reinicio de contenedor; producción
+  (`10.0.0.92`) no se tocó. Las variables nuevas aplican en el próximo
+  `deploy_git.sh preprod`.
+- **Pendiente detectado (previo, no causado por este cambio):** la BD de
+  preprod (la misma que usa el `.env` local) no tiene la tabla
+  `asistente_curso_config`; por eso `/asistente/{token}` responde 500
+  después de validar el token. `migrations.py auditar` reporta 16
+  migraciones pendientes porque `schema_migrations` está vacío. Miguel
+  decidió solo documentarlo por ahora: no se aplicó ninguna migración.
