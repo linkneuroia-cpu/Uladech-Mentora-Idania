@@ -362,12 +362,27 @@ class Settings(BaseSettings):
     ERP_MYSQL_DB: str = ""
 
     # ================= Login de docente (enlace desde Moodle) =================
-    # Token compartido que viaja en la URL que se pega como actividad URL en
-    # Moodle (?username=<documento>&token=<token>&userid=<id>). Secretos en
-    # el .env de produccion, nunca en el repo.
-    DOCENTE_LOGIN_TOKEN: str = ""
     DOCENTE_DEFAULT_DENSE: str = "openai/text-embedding-3-small"
     DOCENTE_DEFAULT_SPARSE: str = "bm25"
+
+    # ================= mod_secureurl (plugin idanIA) =================
+    # Token cifrado AES-256-GCM que emite Moodle (formato "SU1", ver
+    # secureurl.py) para /login (scope="gestor") y /asistente/{token}
+    # (scope="activity") — reemplaza el viejo DOCENTE_LOGIN_TOKEN (secreto
+    # compartido en la URL, retirado) y el userid/courseid en claro de la
+    # URL del chat. Secretos reales SOLO en el .env del servidor, nunca acá.
+    SECUREURL_APP_ID: str = "f1"
+    SECUREURL_KEYS: str = ""  # "version:clave_b64url[,version_anterior:clave]"
+    # Origen de Moodle que puede embeber F1 en un iframe (CSP frame-ancestors
+    # + Permissions-Policy de microfono/portapapeles). Hoy solo el Moodle de
+    # prueba del plugin — ver plan de esta integracion.
+    MOODLE_FRAME_ANCESTOR: str = "https://moodle5.linkneuroia.com"
+    # Cookie de sesion: "lax"/False funciona para desarrollo local (http,
+    # sin iframe). En el .env real del entorno embebido en Moodle debe ser
+    # "none"/True (SameSite=None exige Secure, y el navegador descarta la
+    # cookie si no esta presente dentro de un iframe de otro origen).
+    SESSION_SAMESITE: str = "lax"
+    SESSION_HTTPS_ONLY: bool = False
 
     # ================= LLM Generation & Vision (Pipeline RAG) =================
     # Todas opcionales — se validan de forma perezosa por estrategia (no

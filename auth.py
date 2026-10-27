@@ -9,12 +9,14 @@ solo para el panel interno.
 """
 import hashlib
 import hmac
+import os
 import secrets
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
 
 import db
+import secureurl
 from settings import settings
 
 _PBKDF2_ITERATIONS = 260_000
@@ -185,3 +187,60 @@ def require_docente_curso(request: Request, courseid: Optional[int]) -> Dict[str
             detail="Este curso no figura entre tus cursos del periodo actual.",
         )
     return user
+
+
+# ── mod_secureurl (plugin idanIA) ───────────────────────────────────────
+# Token cifrado AES-256-GCM que emite Moodle para /login (scope="gestor")
+# y /asistente/{token} (scope="activity") — ver secureurl.py (copiado tal
+# cual, no se modifica esa librería). Reemplaza la identificación por
+# username/userid/courseid en claro en la URL.
+
+_secureurl_keys_cache: Optional[Dict[int, bytes]] = None
+
+# Un solo proceso (app.py no usa `workers=` en uvicorn.run) -> alcanza con
+# memoria. Si algún día corre con más de un proceso/réplica, pasar a un
+# almacén compartido (Redis) con el mismo TTL (exp + 60s).
+_jti_cache = secureurl.JtiCache()
+
+_SECUREURL_ERROR_MSG = "Enlace no válido o caducado. Vuelve a abrirlo desde Moodle."
+
+
+def _secureurl_keys() -> Dict[int, bytes]:
+    global _secureurl_keys_cache
+    if _secureurl_keys_cache is None:
+        # pydantic-settings lee SECUREURL_KEYS del .env pero no lo exporta a
+        # os.environ, y secureurl.keys_from_env() sí lee de ahí — se completa
+        # una sola vez, sin pisar un valor que ya venga del entorno real.
+        os.environ.setdefault("SECUREURL_KEYS", settings.SECUREURL_KEYS)
+        _secureurl_keys_cache = secureurl.keys_from_env()
+    return _secureurl_keys_cache
+
+
+def verify_secureurl(token: str, *, scope: str, course: Optional[int] = None) -> secureurl.Claims:
+    """Verifica un token `SU1` de Moodle y exige que su `scope` (y, si se
+    pasa, su `course`) coincidan con lo esperado — ambos ya vienen dentro
+    del JSON descifrado y autenticado por el tag de AES-GCM (`claims.raw`),
+    aunque `secureurl.verify_token()` no los valide por sí misma. Cualquier
+    falla (token ausente/mal formado/vencido/`aud` distinto/reuso de `jti`/
+    `scope` o `course` que no coinciden) levanta el MISMO 403 genérico —
+    nunca se distingue el motivo hacia afuera."""
+    if not token:
+        raise HTTPException(status_code=403, detail=_SECUREURL_ERROR_MSG)
+    try:
+        claims = secureurl.verify_token(token, settings.SECUREURL_APP_ID, _secureurl_keys())
+        if claims.raw.get("scope") != scope:
+            raise secureurl.InvalidToken("scope")
+        if course is not None:
+            raw_course = claims.raw.get("course")
+            if raw_course is None or int(raw_course) != int(course):
+                raise secureurl.InvalidToken("course")
+        if not _jti_cache.check_and_add(claims):
+            raise secureurl.InvalidToken("jti reusado")
+    except secureurl.SecureUrlError:
+        raise HTTPException(status_code=403, detail=_SECUREURL_ERROR_MSG)
+    except (ValueError, TypeError):
+        # claims.raw["course"] con un tipo inesperado (no es un ataque
+        # posible — el payload ya está autenticado — pero tampoco hay que
+        # dejar escapar un 500 por una configuración rara en Moodle).
+        raise HTTPException(status_code=403, detail=_SECUREURL_ERROR_MSG)
+    return claims

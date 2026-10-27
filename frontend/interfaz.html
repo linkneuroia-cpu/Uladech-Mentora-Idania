@@ -1259,9 +1259,10 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
       <button class="btn btn-prim" onclick="usrCreate()" style="height:38px">Crear</button>
     </div>
     <div class="alert a-info" style="margin-top:12px">
-      Enlace para pegar en Moodle como actividad URL (variables de URL <code>username</code> y <code>userid</code>):
-      <code>{{ URL_PREFIX }}/login?username=&lt;documento&gt;&amp;token=&lt;DOCENTE_LOGIN_TOKEN&gt;&amp;userid=&lt;id&gt;</code>
-      <div class="fh">No muestres el token real en la interfaz. Un docente sin contraseña no puede entrar por el formulario.</div>
+      El acceso del docente ya no se pega a mano: lo genera la actividad del
+      plugin idanIA en Moodle (mod_secureurl), que manda un token cifrado de
+      un solo uso a <code>{{ URL_PREFIX }}/login?token=...</code>.
+      <div class="fh">Un docente sin ese token válido (y sin contraseña) no puede entrar por el formulario.</div>
     </div>
   </div>
   <div class="card">

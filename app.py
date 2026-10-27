@@ -14,7 +14,6 @@ import mimetypes
 import re
 import unicodedata
 import uuid
-import zlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -147,6 +146,37 @@ app.add_middleware(
 # asistentes, y documentación/health. Todo lo demás requiere sesión. ──
 _PUBLIC_PATH_PREFIXES = ("/login", "/logout", "/img", "/asistente", "/docs", "/redoc", "/openapi.json", "/api/health")
 
+_CSRF_METODOS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def security_headers_mw(request: Request, call_next):
+    """Cabeceras para que Moodle (mod_secureurl, plugin idanIA) pueda
+    embeber el gestor y el chat en un iframe — ver settings.MOODLE_FRAME_ANCESTOR.
+    Sin X-Frame-Options (nunca se fijó ninguno acá ni en nginx — no hay
+    nada que "quitar", solo no agregarlo). Se corre en TODAS las
+    respuestas, no solo /login y /asistente, porque el panel del gestor
+    también se embebe.
+
+    Además, defensa mínima de CSRF por `Origin`: con la cookie en
+    SameSite=None (necesaria para el iframe) se pierde la protección que
+    daba SameSite=Lax, así que en los métodos que cambian datos se exige
+    que, si la petición trae `Origin`, sea el propio origen de F1 — el
+    fetch() del JS de F1 corriendo DENTRO del iframe lleva el origen de
+    F1 (de donde se cargó ese script), no el de la página que lo embebe."""
+    if request.method in _CSRF_METODOS:
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") != settings.PUBLIC_BASE_URL.rstrip("/"):
+            return JSONResponse({"detail": "Origen no permitido."}, status_code=403)
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = f"frame-ancestors {settings.MOODLE_FRAME_ANCESTOR}"
+    response.headers["Permissions-Policy"] = (
+        f'microphone=(self "{settings.MOODLE_FRAME_ANCESTOR}"), '
+        f'clipboard-read=(self "{settings.MOODLE_FRAME_ANCESTOR}"), '
+        f'clipboard-write=(self "{settings.MOODLE_FRAME_ANCESTOR}")'
+    )
+    return response
+
 
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
@@ -191,7 +221,12 @@ async def auth_gate(request: Request, call_next):
 # (para que request.session ya exista cuando auth_gate lo lee), así que
 # se registra DESPUÉS en el código — verificado en vivo: registrarlo antes
 # rompía con "SessionMiddleware must be installed to access request.session".
-app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY, same_site="lax")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SESSION_SECRET_KEY,
+    same_site=settings.SESSION_SAMESITE,
+    https_only=settings.SESSION_HTTPS_ONLY,
+)
 
 
 # Rutas ABSOLUTAS (ancladas a este archivo), no relativas al cwd del
@@ -266,53 +301,58 @@ def _qparam(request: Request, name: str) -> str:
 
 @app.get("/login", response_class=HTMLResponse, tags=["Interfaz"])
 async def login_page(request: Request):
-    # Enlace directo desde una actividad URL de Moodle:
-    # ?username=<documento>&userid=<userid Moodle>. Con los dos válidos
-    # entra sin ver el formulario; si falta alguno o no valida, se sirve
-    # el login normal (admin con usuario/contraseña).
-    #
-    # TEMPORAL (a pedido de Miguel, 2026-10-21): se retiró la verificación
-    # del secreto compartido DOCENTE_LOGIN_TOKEN para desbloquear el acceso
-    # mientras se rediseña este mecanismo (token cifrado de Moodle,
-    # mod_secureurl — ver doc/Características técnicas de integración.docx).
-    # La única verificación real que queda es que `userid` corresponda de
-    # verdad a `username` en Moodle (docentes.validar_docente). Restaurar
-    # o reemplazar este control antes de considerar el acceso cerrado.
-    username = _qparam(request, "username")
-    userid = _qparam(request, "userid")
-    if username and userid:
+    # Enlace directo desde una actividad URL de Moodle (plugin idanIA,
+    # mod_secureurl): ?token=<token cifrado AES-256-GCM, scope="gestor">.
+    # Reemplaza el viejo esquema de username/userid en claro en la URL (y
+    # el DOCENTE_LOGIN_TOKEN, retirado) — ver secureurl.py/auth.verify_secureurl.
+    # Un token de otro scope (p.ej. "activity", el del chat) o inválido/
+    # vencido/reusado da 403 directo, sin caer al formulario de admin.
+    token = _qparam(request, "token")
+    if token:
+        claims = auth.verify_secureurl(token, scope="gestor")
+        username = claims.get("username")
+        userid = claims.get("userid")
+        if not username or not userid:
+            raise HTTPException(403, "Enlace no válido o caducado. Vuelve a abrirlo desde Moodle.")
         loop = asyncio.get_event_loop()
+        # Defensa adicional (ya no es la única barrera: el token ya probó
+        # que Moodle lo emitió para este `username`/`userid`) — confirma en
+        # vivo que el userid del token corresponde de verdad a ese username.
         moodle_user = await loop.run_in_executor(None, docentes.validar_docente, username, userid)
-        if moodle_user:
-            try:
-                cursos = await loop.run_in_executor(None, docentes.cursos_de, username)
-            except Exception as e:
-                print(f"⚠️ No se pudieron resolver los cursos del docente {username}: {e}")
-                return templates.TemplateResponse(
-                    "login.html",
-                    {"request": request, "error": "No se pudieron consultar tus cursos. Intenta nuevamente más tarde."},
-                    status_code=503,
-                )
-            if not cursos:
-                return templates.TemplateResponse(
-                    "login.html",
-                    {"request": request, "error": "No encontramos cursos tuyos en el periodo actual."},
-                )
-            row = await db.run(
-                auth.upsert_docente, username, moodle_user.get("id"), moodle_user.get("fullname"),
+        if not moodle_user:
+            raise HTTPException(403, "Enlace no válido o caducado. Vuelve a abrirlo desde Moodle.")
+        try:
+            cursos = await loop.run_in_executor(None, docentes.cursos_de, username)
+        except Exception as e:
+            print(f"⚠️ No se pudieron resolver los cursos del docente {username}: {e}")
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "No se pudieron consultar tus cursos. Intenta nuevamente más tarde."},
+                status_code=503,
             )
-            request.session.clear()
-            request.session["user"] = {
-                "id": row["id"],
-                "username": username,
-                "is_admin": False,
-                "rol": "docente",
-                "documento": username,
-                "moodle_userid": row.get("moodle_userid") or moodle_user.get("id"),
-                "nombre": moodle_user.get("fullname") or username,
-                "courseids": [c["courseid"] for c in cursos],
-            }
-            return RedirectResponse(f"{settings.resolved_url_prefix}/gestor")
+        if not cursos:
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "No encontramos cursos tuyos en el periodo actual."},
+            )
+        row = await db.run(
+            auth.upsert_docente, username, moodle_user.get("id"), moodle_user.get("fullname"),
+        )
+        request.session.clear()
+        request.session["user"] = {
+            "id": row["id"],
+            "username": username,
+            "is_admin": False,
+            "rol": "docente",
+            "documento": username,
+            "moodle_userid": row.get("moodle_userid") or moodle_user.get("id"),
+            "nombre": moodle_user.get("fullname") or username,
+            "courseids": [c["courseid"] for c in cursos],
+        }
+        # Redirect sin el `token` en la URL: no queda en el historial del
+        # navegador ni en logs de proxies más de lo necesario (de todas
+        # formas es de un solo uso — JtiCache ya lo invalidó).
+        return RedirectResponse(f"{settings.resolved_url_prefix}/gestor", status_code=303)
     if request.session.get("user"):
         return RedirectResponse(f"{settings.resolved_url_prefix}/gestor")
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
@@ -2099,30 +2139,27 @@ def _safe_week_info(collection_name: Optional[str], courseid: int) -> Optional[D
         return None
 
 
-def _userid_from_documento(documento: str) -> int:
-    """Deriva un moodle_userid entero y ESTABLE a partir de un documento de
-    identidad, para un visitante sin cuenta de Moodle (ver asistente_chat_page).
-    Un DNI peruano ya es numérico — se usa tal cual (coincide 1:1 con la
-    persona real). Para un documento no numérico (carné de extranjería,
-    pasaporte), se deriva un hash estable (crc32, no depende de
-    PYTHONHASHSEED como el `hash()` builtin) para que la misma persona
-    siempre caiga en el mismo pseudo-userid entre visitas."""
-    if documento.isdigit():
-        return int(documento)
-    return zlib.crc32(documento.encode("utf-8")) & 0x7FFFFFFF
+def _chat_identidad(request: Request, token: str) -> Dict[str, int]:
+    """`{userid, courseid}` ya resueltos en la carga de `GET /asistente/{token}`
+    (desde el token de Moodle, o desde la sesión del gestor en modo prueba —
+    ver asistente_chat_page) — la única fuente de identidad para los
+    endpoints hijos (/mensaje, /conversaciones, /carpetas...). Ya no se
+    acepta `courseid`/`userid` por query/body: con un token de 5 min y un
+    solo uso no se puede volver a pedir en cada clic del chat, y aceptarlos
+    del cliente sin más era exactamente el hueco que permitía leer la
+    conversación de otro alumno con solo adivinar sus IDs."""
+    identidad = request.session.get(f"chat_{token}")
+    if not identidad:
+        raise HTTPException(403, "Enlace no válido o caducado. Vuelve a abrirlo desde Moodle.")
+    return identidad
 
 
 @app.get("/asistente/{token}", response_class=HTMLResponse, tags=["Asistente público"])
 async def asistente_chat_page(
     token: str,
     request: Request,
-    courseid: int = Query(0, description="Opcional para asistentes 'normal' sin curso — sentinel 0 si se omite."),
-    userid: Optional[int] = Query(
-        None, description="Userid real de Moodle. Si se omite, se pide documento+nombre en su lugar.",
-    ),
-    documento: Optional[str] = Query(None, description="Alternativa a userid para un visitante sin cuenta de Moodle."),
-    nombre: Optional[str] = Query(None, description="Nombre para saludar — se pide junto con `documento`."),
-    prueba: Optional[str] = Query(None, description="'1' = conversación de prueba del docente (no cuenta en estadísticas)."),
+    courseid: int = Query(0, description="Solo para 'Probar chat' (prueba=1) desde el gestor — ignorado para alumnos/docentes reales, que llegan vía token de Moodle."),
+    prueba: Optional[str] = Query(None, description="'1' = conversación de prueba del docente/admin desde el gestor (no cuenta en estadísticas)."),
 ):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
@@ -2132,10 +2169,8 @@ async def asistente_chat_page(
             status_code=404,
         )
 
-    documento = (documento or "").strip()
-    nombre = (nombre or "").strip()
-
-    # ── Modo prueba (botón "Probar chat"): misma cookie del gestor ─────────
+    # ── Modo prueba (botón "Probar chat"): misma cookie del gestor, no
+    # pasa por Moodle/secureurl — sigue igual que antes. ─────────
     usuario_gestor = request.session.get("user")
     es_prueba = bool(
         usuario_gestor and (prueba or "").strip().lower() in ("1", "true", "si", "sí")
@@ -2164,17 +2199,47 @@ async def asistente_chat_page(
             )
         moodle_username = usuario_gestor.get("username")
         fullname = usuario_gestor.get("nombre") or moodle_username
-    elif userid is None and not (documento and nombre):
-        # Sin userid de Moodle ni documento+nombre todavía: pide identificación
-        # antes de crear ninguna sesión (ver el bloque `necesita_identificacion`
-        # en asistente_chat.html).
-        return templates.TemplateResponse(
-            "asistente_chat.html",
-            {
-                "request": request, "error": None, "necesita_identificacion": True,
-                "token": token, "asistente_nombre": asistente["nombre"], "courseid": courseid,
-            },
-        )
+        # Mismo namespace de sesión que el flujo real (ver abajo), para que
+        # los endpoints hijos (/mensaje, /conversaciones, /carpetas...) no
+        # necesiten distinguir "prueba" de "real": siempre leen de acá.
+        request.session[f"chat_{token}"] = {
+            "userid": effective_userid,
+            "courseid": courseid or asistente.get("moodle_courseid") or 0,
+        }
+    else:
+        # Alumno/docente real, embebido desde Moodle (plugin idanIA,
+        # mod_secureurl) — token obligatorio, de un solo uso y 5 min de
+        # vida. Se canjea UNA vez por una entrada en la sesión propia
+        # (namespaced por `token` del asistente, no el de Moodle) y se
+        # redirige sin el `?token=` en la URL; de ahí en más (y en todos
+        # los endpoints hijos: /mensaje, /conversaciones, /carpetas...) la
+        # identidad viene de esa sesión, nunca de query params/body que el
+        # cliente pueda manipular.
+        chat_key = f"chat_{token}"
+        secure_token = _qparam(request, "token")
+        if secure_token:
+            claims = auth.verify_secureurl(
+                secure_token, scope="activity",
+                course=asistente["moodle_courseid"] if asistente["rd_id"] is None else None,
+            )
+            try:
+                courseid = int(claims.get("courseid"))
+                userid_moodle = int(claims.get("userid"))
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    400, "El token no incluye userid/courseid — revisa la configuración de la actividad en Moodle.",
+                )
+            request.session[chat_key] = {"userid": userid_moodle, "courseid": courseid}
+            return RedirectResponse(f"{settings.resolved_url_prefix}/asistente/{token}", status_code=303)
+        identidad = request.session.get(chat_key)
+        if not identidad:
+            raise HTTPException(403, "Enlace no válido o caducado. Vuelve a abrirlo desde Moodle.")
+        courseid = identidad["courseid"]
+        effective_userid = identidad["userid"]
+        loop = asyncio.get_event_loop()
+        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, effective_userid)
+        moodle_username = moodle_info["username"]
+        fullname = moodle_info["fullname"]
 
     # rd_id=None -> asistente "normal": resuelve directo por su propio
     # courseid (ignora el courseid de la URL, que puede venir de un curso
@@ -2204,17 +2269,6 @@ async def asistente_chat_page(
             status_code=403,
         )
 
-    if not es_prueba:
-        if userid is not None:
-            effective_userid = userid
-            loop = asyncio.get_event_loop()
-            moodle_info = await loop.run_in_executor(None, get_moodle_user_info, userid)
-            moodle_username = moodle_info["username"]
-            fullname = moodle_info["fullname"]
-        else:
-            effective_userid = _userid_from_documento(documento)
-            moodle_username = documento
-            fullname = nombre
     week_info = await db.run(_safe_week_info, collection_name, courseid)
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname, week_info)
 
@@ -2386,85 +2440,78 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
     return result
 
 
-class AsistenteNuevaConversacionRequest(BaseModel):
-    courseid: int
-    userid: int
-
-
 @app.post("/asistente/{token}/nueva-conversacion", tags=["Asistente público"])
-async def asistente_nueva_conversacion(token: str, req: AsistenteNuevaConversacionRequest):
+async def asistente_nueva_conversacion(token: str, request: Request):
     """Crea una sesión nueva (sin arrastrar la memoria de la anterior) para
     el mismo asistente/curso/usuario — botón "Nueva conversación"."""
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
+    courseid, userid = identidad["courseid"], identidad["userid"]
 
     if asistente["rd_id"] is not None:
-        collection_name = await db.run(rds.resolve_collection, asistente["rd_id"], req.courseid)
+        collection_name = await db.run(rds.resolve_collection, asistente["rd_id"], courseid)
     else:
         collection_name = await db.run(rds.resolve_collection_normal, asistente["moodle_courseid"])
     if not collection_name:
-        raise HTTPException(404, f"No hay ninguna colección asignada al curso {req.courseid} en esta RD.")
+        raise HTTPException(404, f"No hay ninguna colección asignada al curso {courseid} en esta RD.")
 
     # Reusa la identidad (moodle_username/fullname) de la última sesión de
-    # este mismo usuario en vez de volver a resolverla — necesario para un
-    # usuario identificado por documento (ver asistente_chat_page): no hay
-    # ninguna cuenta de Moodle real que consultar para ese userid derivado,
-    # y volver a llamar a Moodle ahí devolvería un nombre equivocado (o
-    # ninguno) en vez del nombre que la persona escribió.
+    # este mismo usuario en vez de volver a resolverla — evita otra llamada
+    # a Moodle y preserva el nombre con que ya se saludó antes.
     prev_sesion = await db.run(
         db.fetch_one,
         "SELECT moodle_username, moodle_fullname FROM asistente_sesiones "
         "WHERE asistente_id=%s AND moodle_courseid=%s AND moodle_userid=%s "
         "ORDER BY started_at DESC LIMIT 1",
-        (asistente["id"], req.courseid, req.userid),
+        (asistente["id"], courseid, userid),
     )
     if prev_sesion:
         moodle_username = prev_sesion["moodle_username"]
         fullname = prev_sesion["moodle_fullname"]
     else:
         loop = asyncio.get_event_loop()
-        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, req.userid)
+        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, userid)
         moodle_username = moodle_info["username"]
         fullname = moodle_info["fullname"]
-    week_info = await db.run(_safe_week_info, collection_name, req.courseid)
+    week_info = await db.run(_safe_week_info, collection_name, courseid)
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname, week_info)
 
     sesion = await db.run(
         assistants.get_or_create_sesion,
-        asistente["id"], req.courseid, req.userid, moodle_username, fullname, collection_name, saludo,
+        asistente["id"], courseid, userid, moodle_username, fullname, collection_name, saludo,
         force_new=True,
     )
     return {"sesion_id": sesion["id"], "saludo": saludo}
 
 
 @app.get("/asistente/{token}/conversaciones", tags=["Asistente público"])
-async def asistente_listar_conversaciones(token: str, courseid: int = Query(...), userid: int = Query(...)):
+async def asistente_listar_conversaciones(token: str, request: Request):
     """Sidebar de historial: todas las conversaciones de este alumno con
     este asistente en este curso, más recientes primero, con vista previa."""
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
-    sesiones = await db.run(assistants.list_sesiones, asistente["id"], courseid, userid)
+    identidad = _chat_identidad(request, token)
+    sesiones = await db.run(assistants.list_sesiones, asistente["id"], identidad["courseid"], identidad["userid"])
     return {"conversaciones": sesiones}
 
 
 @app.get("/asistente/{token}/conversaciones/{sesion_id}", tags=["Asistente público"])
-async def asistente_ver_conversacion(
-    token: str, sesion_id: int, courseid: int = Query(...), userid: int = Query(...)
-):
+async def asistente_ver_conversacion(token: str, sesion_id: int, request: Request):
     """Mensajes de una conversación anterior — valida que pertenezca a
-    este asistente/curso/usuario antes de devolverlos (mismo criterio de
-    acceso que el resto de la ruta pública: el token + los parámetros)."""
+    este asistente/curso/usuario antes de devolverlos."""
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
     sesion = await db.run(assistants.get_sesion, sesion_id)
     if (
         not sesion
         or sesion["asistente_id"] != asistente["id"]
-        or sesion["moodle_courseid"] != courseid
-        or sesion["moodle_userid"] != userid
+        or sesion["moodle_courseid"] != identidad["courseid"]
+        or sesion["moodle_userid"] != identidad["userid"]
     ):
         raise HTTPException(404, "Conversación no encontrada.")
     historial = await db.run(assistants.get_mensajes, sesion_id)
@@ -2472,50 +2519,51 @@ async def asistente_ver_conversacion(
     return {"sesion_id": sesion_id, "historial": historial, "saludo": saludo}
 
 
-async def _validar_sesion_del_alumno(token: str, sesion_id: int, courseid: int, userid: int) -> Dict[str, Any]:
+async def _validar_sesion_del_alumno(request: Request, token: str, sesion_id: int) -> Dict[str, Any]:
     """Mismo chequeo de acceso que `asistente_ver_conversacion`, reusado
     por los endpoints de renombrar/mover — el alumno solo puede tocar sus
-    propias sesiones de este asistente/curso."""
+    propias sesiones de este asistente/curso (identidad de la sesión
+    propia, ver `_chat_identidad`, nunca de lo que mande el cliente)."""
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
     sesion = await db.run(assistants.get_sesion, sesion_id)
     if (
         not sesion
         or sesion["asistente_id"] != asistente["id"]
-        or sesion["moodle_courseid"] != courseid
-        or sesion["moodle_userid"] != userid
+        or sesion["moodle_courseid"] != identidad["courseid"]
+        or sesion["moodle_userid"] != identidad["userid"]
     ):
         raise HTTPException(404, "Conversación no encontrada.")
     return asistente
 
 
 class CalificarMensajeRequest(BaseModel):
-    courseid: int
-    userid: int
     calificacion: int  # 1 = útil, -1 = no útil
     comentario: Optional[str] = None  # solo se usa si calificacion == -1
 
 
 @app.patch("/asistente/{token}/mensajes/{mensaje_id}/calificar", tags=["Asistente público"])
-async def asistente_calificar_mensaje(token: str, mensaje_id: int, req: CalificarMensajeRequest):
+async def asistente_calificar_mensaje(token: str, mensaje_id: int, req: CalificarMensajeRequest, request: Request):
     """El alumno indica si la respuesta le fue útil (no califica al
     mentor/RD, solo la interacción). Solo mensajes 'assistant' de una
-    sesión que pertenezca a este token+courseid+userid."""
+    sesión que pertenezca a este token + la identidad de su propia sesión."""
     if req.calificacion not in (1, -1):
         raise HTTPException(400, "calificacion debe ser 1 o -1")
 
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
 
     mensaje = await db.run(assistants.get_mensaje_con_sesion, mensaje_id)
     if (
         not mensaje
         or mensaje["rol"] != "assistant"
         or mensaje["asistente_id"] != asistente["id"]
-        or mensaje["moodle_courseid"] != req.courseid
-        or mensaje["moodle_userid"] != req.userid
+        or mensaje["moodle_courseid"] != identidad["courseid"]
+        or mensaje["moodle_userid"] != identidad["userid"]
     ):
         raise HTTPException(404, "Mensaje no encontrado.")
 
@@ -2528,65 +2576,62 @@ async def asistente_calificar_mensaje(token: str, mensaje_id: int, req: Califica
 
 
 class RenombrarSesionRequest(BaseModel):
-    courseid: int
-    userid: int
     nombre: Optional[str] = None  # None/vacío = vuelve al nombre por defecto
 
 
 @app.patch("/asistente/{token}/conversaciones/{sesion_id}/nombre", tags=["Asistente público"])
-async def asistente_renombrar_sesion(token: str, sesion_id: int, req: RenombrarSesionRequest):
-    await _validar_sesion_del_alumno(token, sesion_id, req.courseid, req.userid)
+async def asistente_renombrar_sesion(token: str, sesion_id: int, req: RenombrarSesionRequest, request: Request):
+    await _validar_sesion_del_alumno(request, token, sesion_id)
     sesion = await db.run(assistants.rename_sesion, sesion_id, req.nombre)
     return {"sesion_id": sesion["id"], "nombre": sesion["nombre"]}
 
 
 class MoverSesionRequest(BaseModel):
-    courseid: int
-    userid: int
     carpeta_id: Optional[int] = None  # None = sacar de cualquier carpeta
 
 
 @app.patch("/asistente/{token}/conversaciones/{sesion_id}/carpeta", tags=["Asistente público"])
-async def asistente_mover_sesion(token: str, sesion_id: int, req: MoverSesionRequest):
-    await _validar_sesion_del_alumno(token, sesion_id, req.courseid, req.userid)
+async def asistente_mover_sesion(token: str, sesion_id: int, req: MoverSesionRequest, request: Request):
+    await _validar_sesion_del_alumno(request, token, sesion_id)
     sesion = await db.run(assistants.mover_sesion_a_carpeta, sesion_id, req.carpeta_id)
     return {"sesion_id": sesion["id"], "carpeta_id": sesion["carpeta_id"]}
 
 
 class CrearCarpetaRequest(BaseModel):
-    courseid: int
-    userid: int
     nombre: str
 
 
 @app.post("/asistente/{token}/carpetas", status_code=201, tags=["Asistente público"])
-async def asistente_crear_carpeta(token: str, req: CrearCarpetaRequest):
+async def asistente_crear_carpeta(token: str, req: CrearCarpetaRequest, request: Request):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
     try:
-        carpeta = await db.run(assistants.create_carpeta, asistente["id"], req.userid, req.nombre)
+        carpeta = await db.run(assistants.create_carpeta, asistente["id"], identidad["userid"], req.nombre)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return carpeta
 
 
 @app.get("/asistente/{token}/carpetas", tags=["Asistente público"])
-async def asistente_listar_carpetas(token: str, courseid: int = Query(...), userid: int = Query(...)):
+async def asistente_listar_carpetas(token: str, request: Request):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
-    carpetas = await db.run(assistants.list_carpetas, asistente["id"], userid)
+    identidad = _chat_identidad(request, token)
+    carpetas = await db.run(assistants.list_carpetas, asistente["id"], identidad["userid"])
     return {"carpetas": carpetas}
 
 
 @app.delete("/asistente/{token}/carpetas/{carpeta_id}", tags=["Asistente público"])
-async def asistente_borrar_carpeta(token: str, carpeta_id: int, courseid: int = Query(...), userid: int = Query(...)):
+async def asistente_borrar_carpeta(token: str, carpeta_id: int, request: Request):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
         raise HTTPException(404, "Este asistente no existe o no está activo.")
+    identidad = _chat_identidad(request, token)
     carpeta = await db.run(assistants.get_carpeta, carpeta_id)
-    if not carpeta or carpeta["asistente_id"] != asistente["id"] or carpeta["moodle_userid"] != userid:
+    if not carpeta or carpeta["asistente_id"] != asistente["id"] or carpeta["moodle_userid"] != identidad["userid"]:
         raise HTTPException(404, "Carpeta no encontrada.")
     await db.run(assistants.delete_carpeta, carpeta_id)
     return {"success": True}

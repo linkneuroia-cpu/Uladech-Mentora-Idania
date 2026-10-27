@@ -160,20 +160,12 @@ mark.chat-hit.current{background:#f59e0b;color:#fff}
 .errbox{max-width:420px;margin:auto;text-align:center;padding:32px;background:#fff;border-radius:var(--radius-lg);box-shadow:var(--shadow-md)}
 .errbox h2{font-size:17px;margin-bottom:8px}
 .errbox p{color:var(--gray-600);font-size:14px}
-.ident-field{display:block;text-align:left;font-size:12px;font-weight:600;color:var(--gray-700)}
-.ident-field input{display:block;width:100%;margin-top:5px;padding:10px 12px;border-radius:8px;border:1px solid var(--neutral-300);
-  font-family:inherit;font-size:14px;color:var(--gray-800)}
-.ident-field input:focus{outline:none;border-color:var(--blue-650)}
-.ident-btn{margin-top:16px;width:100%;padding:11px;border-radius:8px;border:none;background:var(--blue-700);color:#fff;
-  font-family:inherit;font-size:14px;font-weight:600;cursor:pointer}
-.ident-btn:hover{background:var(--blue-800)}
-.ident-err{color:var(--red-700);font-size:12.5px;margin-top:8px;min-height:16px}
 .msg .katex-display{overflow-x:auto;overflow-y:hidden;padding:4px 0}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 </head>
-<body class="{% if not error and not necesita_identificacion %}chat-full{% endif %}">
+<body class="{% if not error %}chat-full{% endif %}">
 {% if error %}
 <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:20px">
   <div class="errbox">
@@ -182,56 +174,6 @@ mark.chat-hit.current{background:#f59e0b;color:#fff}
     <p>{{ error }}</p>
   </div>
 </div>
-{% elif necesita_identificacion %}
-<div style="flex:1;display:flex;align-items:center;justify-content:center;padding:20px">
-  <div class="errbox" id="ident-box" hidden>
-    <div class="logo-circle" style="width:56px;height:56px;margin:0 auto 14px"><img src="{{ URL_PREFIX }}/img/uladechcatolica-logo-purple-300x213.webp" alt="Logo"></div>
-    <h2>Antes de empezar</h2>
-    <p style="margin-bottom:16px">Para que <strong>{{ asistente_nombre }}</strong> pueda saludarte, cuéntanos quién eres.</p>
-    <label class="ident-field">Documento de identidad
-      <input id="ident-doc" type="text" placeholder="Ej: 12345678" autocomplete="off" onkeydown="if(event.key==='Enter')identContinuar()">
-    </label>
-    <label class="ident-field" style="margin-top:10px">Nombre completo
-      <input id="ident-nombre" type="text" placeholder="Ej: María Pérez" autocomplete="off" onkeydown="if(event.key==='Enter')identContinuar()">
-    </label>
-    <p class="ident-err" id="ident-err"></p>
-    <button class="ident-btn" id="ident-btn" onclick="identContinuar()">Comenzar</button>
-  </div>
-</div>
-<script>
-(function(){
-  const TOKEN = {{ token|tojson }};
-  const COURSEID = {{ courseid|tojson }};
-  const STORAGE_KEY = 'asistente_ident_' + TOKEN;
-
-  function buildUrl(documento, nombre){
-    const u = new URL(window.location.href);
-    u.searchParams.set('documento', documento);
-    u.searchParams.set('nombre', nombre);
-    if(!u.searchParams.has('courseid')) u.searchParams.set('courseid', COURSEID);
-    return u.toString();
-  }
-
-  // Visitante que ya se identificó antes en este navegador: saltea el
-  // formulario y entra directo, sin pedirle los datos de nuevo cada vez
-  // que abre el enlace.
-  let saved = null;
-  try{ saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); }catch(e){}
-  if(saved && saved.documento && saved.nombre){
-    window.location.replace(buildUrl(saved.documento, saved.nombre));
-  }else{
-    document.getElementById('ident-box').hidden = false;
-    window.identContinuar = function(){
-      const documento = document.getElementById('ident-doc').value.trim();
-      const nombre = document.getElementById('ident-nombre').value.trim();
-      const err = document.getElementById('ident-err');
-      if(!documento || !nombre){ err.textContent = 'Completa ambos campos.'; return; }
-      try{ localStorage.setItem(STORAGE_KEY, JSON.stringify({documento, nombre})); }catch(e){}
-      window.location.href = buildUrl(documento, nombre);
-    };
-  }
-})();
-</script>
 {% else %}
 <div class="sidebar-backdrop" id="sbdrop" onclick="toggleSidebar(false)"></div>
 <aside class="sidebar" id="sidebar">
@@ -290,8 +232,6 @@ mark.chat-hit.current{background:#f59e0b;color:#fff}
 <script>
 const TOKEN = {{ token|tojson }};
 let SESION_ID = {{ sesion_id|tojson }};
-const COURSEID = {{ courseid|tojson }};
-const USERID = {{ userid|tojson }};
 const HISTORIAL = {{ historial|tojson }};
 const SALUDO_INICIAL = {{ saludo|tojson }};
 const REENCUENTRO_INICIAL = {{ reencuentro|tojson }};
@@ -702,7 +642,7 @@ async function enviarCalificacion(msgId, valor, comentario){
     const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/mensajes/${msgId}/calificar`, {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({courseid: COURSEID, userid: USERID, calificacion: valor, comentario}),
+      body: JSON.stringify({calificacion: valor, comentario}),
     });
     if(!r.ok) throw new Error((await r.json()).detail || 'No se pudo enviar la calificación');
     return true;
@@ -767,11 +707,7 @@ async function nuevaConversacion(){
   btnEl.disabled = true;
   btnEl.textContent = 'Cargando…';
   try{
-    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/nueva-conversacion`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({courseid: COURSEID, userid: USERID}),
-    });
+    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/nueva-conversacion`, {method: 'POST'});
     const j = await r.json();
     if(!r.ok) throw new Error(j.detail || 'No se pudo crear la conversación');
     SESION_ID = j.sesion_id;
@@ -829,8 +765,8 @@ async function loadConversaciones(){
   list.innerHTML = '<p class="muted" style="padding:10px;font-size:12px;color:var(--gray-500)">Cargando…</p>';
   try{
     const [rConv, rCarp] = await Promise.all([
-      fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones?courseid=${COURSEID}&userid=${USERID}`),
-      fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/carpetas?courseid=${COURSEID}&userid=${USERID}`),
+      fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones`),
+      fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/carpetas`),
     ]);
     const jConv = await rConv.json();
     const jCarp = await rCarp.json();
@@ -869,7 +805,7 @@ async function renombrarConversacion(sesionId){
     const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones/${sesionId}/nombre`, {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({courseid: COURSEID, userid: USERID, nombre: nuevo}),
+      body: JSON.stringify({nombre: nuevo}),
     });
     if(!r.ok) throw new Error((await r.json()).detail || 'No se pudo renombrar');
     loadConversaciones();
@@ -882,7 +818,7 @@ async function moverConversacion(sesionId, carpetaIdStr){
     const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones/${sesionId}/carpeta`, {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({courseid: COURSEID, userid: USERID, carpeta_id}),
+      body: JSON.stringify({carpeta_id}),
     });
     if(!r.ok) throw new Error((await r.json()).detail || 'No se pudo mover la conversación');
     loadConversaciones();
@@ -896,7 +832,7 @@ async function nuevaCarpeta(){
     const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/carpetas`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({courseid: COURSEID, userid: USERID, nombre: nombre.trim()}),
+      body: JSON.stringify({nombre: nombre.trim()}),
     });
     if(!r.ok) throw new Error((await r.json()).detail || 'No se pudo crear la carpeta');
     loadConversaciones();
@@ -906,7 +842,7 @@ async function nuevaCarpeta(){
 async function borrarCarpeta(carpetaId){
   if(!confirm('¿Eliminar esta carpeta? Las conversaciones dentro no se borran, solo quedan sin carpeta.')) return;
   try{
-    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/carpetas/${carpetaId}?courseid=${COURSEID}&userid=${USERID}`, {method: 'DELETE'});
+    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/carpetas/${carpetaId}`, {method: 'DELETE'});
     if(!r.ok) throw new Error((await r.json()).detail || 'No se pudo eliminar la carpeta');
     loadConversaciones();
   }catch(e){ alert(e.message); }
@@ -918,7 +854,7 @@ async function abrirConversacion(sesionId){
   toggleSidebar(false);
   chat.innerHTML = '<div class="loading-note"><span class="typing" style="padding:0"><span></span><span></span><span></span></span> Cargando conversación…</div>';
   try{
-    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones/${sesionId}?courseid=${COURSEID}&userid=${USERID}`);
+    const r = await fetch(`{{ URL_PREFIX }}/asistente/${TOKEN}/conversaciones/${sesionId}`);
     const j = await r.json();
     if(!r.ok) throw new Error(j.detail || 'No se pudo abrir esa conversación');
     SESION_ID = sesionId;

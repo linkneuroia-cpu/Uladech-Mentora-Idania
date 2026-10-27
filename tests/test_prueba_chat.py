@@ -67,6 +67,6 @@ def test_prueba_sin_sesion_del_gestor_se_ignora(monkeypatch):
     monkeypatch.setattr(assistants, "get_asistente_by_token", fake_get)
     client = TestClient(appmod.app)
     r = client.get("/asistente/tok?prueba=1&courseid=1472")
-    assert r.status_code == 200
-    # Sin cookie del gestor, `prueba` se ignora y se pide identificación normal.
-    assert "Antes de empezar" in r.text
+    # Sin cookie del gestor, `prueba` se ignora y cae al flujo real (Moodle,
+    # mod_secureurl) — sin `?token=` ahí, no hay ningún acceso anónimo.
+    assert r.status_code == 403
