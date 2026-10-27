@@ -9,15 +9,18 @@ para detectar riesgo de alucinación en ambas versiones y comparar.
 Uso: venv/Scripts/python.exe run_adversarial_tests.py
 """
 import asyncio
+import os
 import json
 
 import rag_pipeline
+
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
 
 DENSE = "openai/text-embedding-3-small"
 SPARSE = "bm25"
 COLLECTIONS = ["Curso_1472", "Curso_1472_experiment_v2"]
 
-with open("eval_dataset_curso_1472_adversarial.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_curso_1472_adversarial.json"), encoding="utf-8") as f:
     DATASET = json.load(f)
 
 
@@ -45,7 +48,7 @@ async def main():
             print()
         all_results.append(row)
 
-    with open("adversarial_test_results.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "adversarial_test_results.json"), "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print("\nGuardado: adversarial_test_results.json")
 

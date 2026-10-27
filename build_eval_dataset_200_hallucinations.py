@@ -18,6 +18,9 @@ producción esta sesión -- para poder contrastar automáticamente, no solo
 confiar en el juez LLM)}.
 """
 import json
+import os
+
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
 
 ITEMS = []
 _next_id = [1]
@@ -309,6 +312,6 @@ for it in ITEMS:
     by_course[it["course"]] += 1
 print("Por curso:", by_course)
 
-with open("eval_dataset_200_hallucinations.json", "w", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_200_hallucinations.json"), "w", encoding="utf-8") as f:
     json.dump(ITEMS, f, ensure_ascii=False, indent=2)
 print("Guardado: eval_dataset_200_hallucinations.json")

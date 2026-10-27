@@ -1,0 +1,38 @@
+# Contexto de build de Docker — sin esto, `build: .` incluye temp_docs/
+# (descargas temporales de vectorización, decenas de GB acumulados) y el
+# build falla por espacio al transferir el contexto. Refleja .gitignore.
+.git
+.gitignore
+.claude/
+venv/
+__pycache__/
+*.pyc
+temp_docs/
+.env
+.env.example
+deploy/.env.deploy
+deploy/.env.deploy.preprod
+runtime_config.json
+*.dump
+*.log
+node_modules/
+test-results/
+playwright-report/
+playwright.config.ts
+package.json
+package-lock.json
+Data prueba/
+3_wowdash-tailwind-css-admin-dashboard-template-*.zip
+*.docx
+PLAN.md
+plan-deeseepk.md
+eval_dataset_*.json
+evaluation_*_results.*
+evaluation_*_summary.json
+full_eval_comparison_results*.json
+three_way_eval_comparison_results.json
+adversarial_test_results.json
+baseline_eval_results*.json
+revectorize_*.json
+evaluate_vectorization_results.json
+_tmp_recent_1472.json

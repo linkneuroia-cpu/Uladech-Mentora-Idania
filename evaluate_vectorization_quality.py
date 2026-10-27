@@ -13,6 +13,7 @@ consumido después por generate_vectorization_report.py para armar el
 .docx final.
 """
 import json
+import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -23,8 +24,10 @@ from qdrant_client import QdrantClient
 import db
 from settings import settings
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 COLLECTIONS = ["Curso_1472", "Curso_1541"]
-OUT_PATH = Path(__file__).parent / "evaluate_vectorization_results.json"
+OUT_PATH = Path(__file__).parent / "tests" / "eval" / "evaluate_vectorization_results.json"
 
 STRUCTURED_TYPES = ("pdf", "docx")  # ver definitions._STRUCTURED_BLOCK_EXTRACTORS
 

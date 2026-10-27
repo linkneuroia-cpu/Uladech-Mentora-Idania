@@ -38,6 +38,11 @@ from settings import settings
 
 DEFAULT_TTL_MINUTES = 1440  # 24h — respaldo secundario, no el mecanismo principal
 
+# Versión del formato guardado en `course_map_cache.map_json`. Al cambiarla,
+# las entradas viejas se consideran incompatibles y se vuelven a pedir a
+# Moodle — así se agregan campos nuevos (p.ej. `dates`) sin migración de BD.
+CACHE_VERSION = 2
+
 
 @dataclass
 class Activity:
@@ -49,6 +54,10 @@ class Activity:
     uservisible: bool
     completion_tracking: int        # 0/1/2 = sin seguimiento/manual/automático (MODO, no estado)
     section_number: int
+    # Fechas reales del módulo tal como las expone core_course_get_contents
+    # ([{label: "Apertura"|"Cierre"|"Vencimiento", timestamp}]). Antes se
+    # descartaban y por eso "¿cuándo es el examen?" no tenía fecha.
+    dates: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -67,20 +76,52 @@ class CourseMap:
     sections: List[Section] = field(default_factory=list)
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
+        data = asdict(self)
+        data["cache_version"] = CACHE_VERSION
+        return json.dumps(data, ensure_ascii=False)
 
     @staticmethod
     def from_json(raw: str) -> "CourseMap":
         data = json.loads(raw)
-        sections = [
-            Section(
+        sections = []
+        for s in data.get("sections", []):
+            # Cachés viejos (sin `dates`) siguen siendo legibles: Activity
+            # tiene `dates=[]` por defecto (ver CACHE_VERSION).
+            activities = [Activity(**a) for a in s.get("activities", [])]
+            sections.append(Section(
                 section_number=s["section_number"], name=s["name"], visible=s["visible"],
-                summary=s["summary"],
-                activities=[Activity(**a) for a in s.get("activities", [])],
-            )
-            for s in data.get("sections", [])
-        ]
+                summary=s["summary"], activities=activities,
+            ))
         return CourseMap(course_id=data["course_id"], fetched_at=data["fetched_at"], sections=sections)
+
+
+def _normalize_dates(raw: Any) -> List[Dict[str, Any]]:
+    """Normaliza `dates` de core_course_get_contents a [{label, timestamp}]
+    con la etiqueta sin los dos puntos ("Apertura", "Cierre", ...)."""
+    out: List[Dict[str, Any]] = []
+    for d in raw or []:
+        if not isinstance(d, dict):
+            continue
+        label = str(d.get("label") or "").strip().rstrip(":").strip()
+        ts = d.get("timestamp") or d.get("date")
+        if label and ts:
+            try:
+                out.append({"label": label, "timestamp": int(ts)})
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def activity_due(activity: "Activity") -> Optional[int]:
+    """Timestamp real de cierre/vencimiento de una actividad, o None si
+    Moodle no lo expone."""
+    for d in (activity.dates or []):
+        if str(d.get("label") or "").strip().lower() in ("cierre", "vencimiento"):
+            try:
+                return int(d["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                continue
+    return None
 
 
 def _fetch_course_map_from_moodle(course_id: int) -> CourseMap:
@@ -112,6 +153,7 @@ def _fetch_course_map_from_moodle(course_id: int) -> CourseMap:
                 uservisible=bool(m.get("uservisible", m.get("visible", 1))),
                 completion_tracking=int(m.get("completion") or 0),
                 section_number=raw_section.get("section", 0),
+                dates=_normalize_dates(m.get("dates")),
             )
             for m in raw_section.get("modules", [])
         ]
@@ -143,7 +185,15 @@ def get_course_map(course_id: int, force_refresh: bool = False) -> CourseMap:
         if row and row["invalidated_at"] is None:
             age_minutes = (datetime.now(timezone.utc) - row["fetched_at"]).total_seconds() / 60
             if age_minutes < row["ttl_minutes"]:
-                return CourseMap.from_json(json.dumps(row["map_json"]) if isinstance(row["map_json"], dict) else row["map_json"])
+                raw = json.dumps(row["map_json"]) if isinstance(row["map_json"], dict) else row["map_json"]
+                try:
+                    cached = json.loads(raw)
+                except (TypeError, ValueError):
+                    cached = {}
+                # Caché viejo (sin la versión actual) se ignora y se
+                # vuelve a pedir a Moodle — sin migración de base.
+                if cached.get("cache_version") == CACHE_VERSION:
+                    return CourseMap.from_json(raw)
 
     course_map = _fetch_course_map_from_moodle(course_id)
     db.execute(

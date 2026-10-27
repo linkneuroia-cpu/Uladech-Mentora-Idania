@@ -11,8 +11,12 @@ BEGIN;
 CREATE TABLE usuarios (
     id              SERIAL PRIMARY KEY,
     username        VARCHAR(80) NOT NULL UNIQUE,
-    password_hash   VARCHAR(200) NOT NULL,   -- formato "salt_hex:hash_hex" (pbkdf2_hmac sha256)
-    is_admin        BOOLEAN NOT NULL DEFAULT FALSE,
+    password_hash   VARCHAR(200),            -- formato "salt_hex:hash_hex" (pbkdf2_hmac sha256); NULL para docentes (entran por enlace Moodle)
+    is_admin        BOOLEAN NOT NULL DEFAULT FALSE,  -- legado: se mantiene sincronizado con rol
+    rol             VARCHAR(20) NOT NULL DEFAULT 'admin' CHECK (rol IN ('admin','docente')),
+    documento       VARCHAR(20) UNIQUE,      -- documento del docente (login por enlace Moodle)
+    moodle_userid   INTEGER,
+    nombre          VARCHAR(200),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login      TIMESTAMPTZ
 );
@@ -92,12 +96,43 @@ CREATE TABLE asistentes (
     sparse_strategy         VARCHAR(100),
     rerank_strategy         VARCHAR(100),
     generation_strategy     VARCHAR(100),
+    -- Funcionalidades configurables (docente/admin). TRUE = comportamiento
+    -- histórico: usa el router/Moodle y responde sobre los documentos.
+    func_notas              BOOLEAN NOT NULL DEFAULT TRUE,
+    func_documentos         BOOLEAN NOT NULL DEFAULT TRUE,
+    func_navegacion         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by              INTEGER REFERENCES usuarios(id) ON DELETE SET NULL
 );
 CREATE INDEX idx_asistentes_rd_id ON asistentes(rd_id);
 CREATE INDEX idx_asistentes_token ON asistentes(token);
+
+-- ── asistente_documentos_excluidos: documentos que el docente decidió no
+-- usar al responder, POR CURSO (un asistente de RD comparte aulas) ─────────
+CREATE TABLE asistente_documentos_excluidos (
+    asistente_id     INTEGER NOT NULL REFERENCES asistentes(id) ON DELETE CASCADE,
+    moodle_courseid  INTEGER NOT NULL DEFAULT 0,
+    filename         VARCHAR(500) NOT NULL,
+    excluido_por     INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asistente_id, moodle_courseid, filename)
+);
+
+-- ── asistente_curso_config: overrides de funcionalidades/activación por
+-- curso (lo que edita el docente sin tocar el asistente global ni la RD) ────
+CREATE TABLE asistente_curso_config (
+    asistente_id            INTEGER NOT NULL REFERENCES asistentes(id) ON DELETE CASCADE,
+    moodle_courseid         INTEGER NOT NULL,
+    func_notas              BOOLEAN NOT NULL DEFAULT TRUE,
+    func_documentos         BOOLEAN NOT NULL DEFAULT TRUE,
+    func_navegacion         BOOLEAN NOT NULL DEFAULT TRUE,
+    max_actividades_sesion  INTEGER NOT NULL DEFAULT 10,
+    activo                  BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_by              INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (asistente_id, moodle_courseid)
+);
 
 -- ── asistente_carpetas: agrupan conversaciones de un mismo alumno con un
 -- mismo asistente, para organizar la sidebar de historial ─────────────────
@@ -121,10 +156,15 @@ CREATE TABLE asistente_sesiones (
     qdrant_collection_name  VARCHAR(255) NOT NULL,
     nombre                  VARCHAR(150),  -- NULL = usa el nombre por defecto (vista previa del primer mensaje)
     carpeta_id              INTEGER REFERENCES asistente_carpetas(id) ON DELETE SET NULL,
+    -- Conversación de PRUEBA (botón "Probar chat" del docente): no se mezcla
+    -- con las de alumnos ni se cuenta en estadísticas.
+    es_prueba               BOOLEAN NOT NULL DEFAULT FALSE,
+    probado_por             INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
     started_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_activity_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_asistente_sesiones_lookup ON asistente_sesiones(asistente_id, moodle_courseid, moodle_userid);
+CREATE INDEX idx_asistente_sesiones_prueba ON asistente_sesiones(es_prueba);
 
 -- ── asistente_mensajes: historial completo de preguntas/respuestas ────────
 CREATE TABLE asistente_mensajes (

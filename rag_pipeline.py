@@ -11,9 +11,10 @@ import re
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from qdrant_admin import get_qdrant_admin
+from qdrant_client.models import Filter, FieldCondition, MatchAny
 from settings import settings
 from strategies import registry as strategy_registry
 from strategies.generation import SYSTEM_PROMPT_TEMPLATE
@@ -46,9 +47,12 @@ async def hybrid_retrieve(
     top_k: Optional[int] = None,
     prefetch_limit: Optional[int] = None,
     timings: Optional[Dict[str, float]] = None,
+    excluded_filenames: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Embebe la consulta con las estrategias dense+sparse activas y
-    recupera candidatos fusionados (RRF) en una sola llamada a Qdrant."""
+    recupera candidatos fusionados (RRF) en una sola llamada a Qdrant.
+    `excluded_filenames`: documentos que el docente decidió no usar — se
+    excluyen en el propio filtro de Qdrant (must_not), no después."""
     dense = strategy_registry.get_dense_strategy(dense_strategy_name)
     sparse = strategy_registry.get_sparse_strategy(sparse_strategy_name)
 
@@ -64,6 +68,11 @@ async def hybrid_retrieve(
         timings["embed_query_ms"] = (time.perf_counter() - t0) * 1000
 
     admin = get_qdrant_admin()
+    query_filter = None
+    if excluded_filenames:
+        query_filter = Filter(
+            must_not=[FieldCondition(key="filename", match=MatchAny(any=list(excluded_filenames)))]
+        )
     # admin.hybrid_search() es una llamada síncrona (qdrant_client con HTTP
     # sync) — sin run_in_executor bloquearía el event loop entero mientras
     # dura la consulta a Qdrant, serializando a TODOS los usuarios
@@ -81,6 +90,7 @@ async def hybrid_retrieve(
             sparse_values=sparse_vector["values"],
             limit=top_k or settings.RERANK_TOP_K,
             **({"prefetch_limit": prefetch_limit} if prefetch_limit else {}),
+            **({"query_filter": query_filter} if query_filter is not None else {}),
         ),
     )
     if timings is not None:
@@ -107,6 +117,7 @@ async def retrieve_rerank_boost(
     top_k: Optional[int] = None,
     top_n: Optional[int] = None,
     timings: Optional[Dict[str, float]] = None,
+    excluded_filenames: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """hybrid_retrieve() -> reranker.rerank() sobre todo el pool recuperado
     -> apply_source_boost() (prioriza curso_propio) -> apply_week_boost()
@@ -144,6 +155,7 @@ async def retrieve_rerank_boost(
         top_k=effective_top_k,
         prefetch_limit=effective_prefetch_limit,
         timings=timings,
+        excluded_filenames=excluded_filenames,
     )
     if not candidates:
         return []
@@ -356,6 +368,50 @@ def _find_course_map_resource(course_id: Optional[int], reference: str) -> Optio
     return None
 
 
+_CAMPUS_URL_RE = re.compile(r"https?://campus\.uladech\.edu\.pe/[^\s)\]]+")
+
+
+def _remove_unbacked_urls(
+    answer: str, candidates: List[Dict[str, Any]]
+) -> Tuple[str, List[str]]:
+    """Quita los enlaces del campus que NO aparecen en la evidencia de este
+    turno. Bug real (curso 1440): sin evidencia de la semana 8, el modelo
+    copió los enlaces de la tabla de la semana 7 que estaban en el historial.
+    En un enlace markdown `[texto](url)` se conserva el texto; una URL suelta
+    se elimina. Devuelve la respuesta limpia y las URLs quitadas."""
+    import json as _json
+
+    evidence = _json.dumps(candidates, ensure_ascii=False, default=str)
+    removed: List[str] = []
+
+    def _keep(url: str) -> bool:
+        return url in evidence
+
+    def _repl_markdown(m):
+        text, url = m.group(1), m.group(2)
+        if _keep(url):
+            return m.group(0)
+        removed.append(url)
+        return text
+
+    def _repl_bare(m):
+        raw = m.group(0)
+        url = raw.rstrip(".,;:")
+        suffix = raw[len(url):]
+        if _keep(url) or _keep(raw):
+            return raw
+        removed.append(url)
+        return suffix
+
+    answer = re.sub(
+        r"\[([^\]]*)\]\((https?://campus\.uladech\.edu\.pe/[^)\s]+)\)",
+        _repl_markdown,
+        answer,
+    )
+    answer = _CAMPUS_URL_RE.sub(_repl_bare, answer)
+    return answer, removed
+
+
 def build_generation_prompt(
     query: str,
     candidates: List[Dict[str, Any]],
@@ -381,7 +437,10 @@ def build_generation_prompt(
 
         citation_parts = [payload.get("filename") or "documento"]
         if payload.get("section_name"):
-            citation_parts.append(f"semana/sección: {payload['section_name']}")
+            # El nombre de la sección de Moodle NO es un documento: antes se
+            # rotulaba "semana/sección" y el modelo lo listaba como una fila
+            # "Documento" (bug real: "Evaluación de la Unidad I").
+            citation_parts.append(f"sección de Moodle (no es un documento): {payload['section_name']}")
         if payload.get("slide_number") is not None:
             citation_parts.append(f"diapositiva {payload['slide_number']}")
         start_time = payload.get("start_time")
@@ -510,6 +569,8 @@ async def answer_query(
     history: Optional[List[Dict[str, str]]] = None,
     course_id: Optional[int] = None,
     user_id: Optional[int] = None,
+    funcionalidades: Optional[Dict[str, Any]] = None,
+    excluded_filenames: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Pipeline completo: retrieve_rerank_boost() [Qdrant hybrid + rerank +
     boosts] + campos_estructurados.structured_lookup() [evidencia de tabla
@@ -526,47 +587,60 @@ async def answer_query(
     no un asistente aparte: se consulta siempre (si la colección no tiene
     índice poblado, structured_lookup() devuelve None sin error y el
     pipeline sigue igual que antes de que existiera)."""
+    documentos_habilitado = (
+        True if funcionalidades is None else bool(funcionalidades.get("documentos", True))
+    )
+    excluded_filenames = list(excluded_filenames or [])
+
     t_total = time.perf_counter()
     timings: Dict[str, float] = {}
-    candidates = await retrieve_rerank_boost(
-        collection_name=collection_name,
-        query=query,
-        dense_strategy_name=dense_strategy_name,
-        sparse_strategy_name=sparse_strategy_name,
-        rerank_strategy_name=rerank_strategy_name,
-        top_n=top_n,
-        timings=timings,
-    )
-    # Se filtra ACÁ (antes de armar el prompt), no solo al construir
-    # `sources` más abajo — si no, el LLM seguía viendo en su contexto
-    # candidatos irrelevantes aunque la UI ya no los mostrara como fuentes,
-    # y a veces respondía con eso en vez de admitir que no tiene material
-    # para esa pregunta. Con la lista vacía, build_generation_prompt() cae
-    # en "(sin fragmentos recuperados)" y el system prompt le indica qué
-    # hacer en ese caso.
-    candidates = [c for c in candidates if c.get("rerank_score", 1.0) >= MIN_SOURCE_RELEVANCE]
+    candidates: List[Dict[str, Any]] = []
 
-    # Índice de campos estructurados: si la pregunta apunta a un campo real
-    # de esta colección (descubierto de los datos, no de una lista fija —
-    # ver campos_estructurados.py), se inyecta como evidencia de alta
-    # confianza en el MISMO pool que compite/se cita junto con lo
-    # recuperado por Qdrant — no es una respuesta aparte. Ambiguo -> se
-    # preserva la contradicción explícitamente, nunca se elige un valor por
-    # mayoría. Insuficiente/no encontrado/colección sin índice -> no se
-    # toca nada, sigue el RAG normal sin este paso (siempre seguro: si la
-    # colección no tiene índice poblado en Postgres, structured_lookup()
-    # devuelve None de inmediato, sin excepción).
-    t0 = time.perf_counter()
-    try:
-        structured = await campos_estructurados.structured_lookup(
-            collection_name, query, dense_strategy_name=dense_strategy_name)
-    except Exception as e:
-        print(f"⚠️ structured_lookup falló (se ignora, sigue el RAG normal): {e}")
-        structured = None
-    timings["structured_lookup_ms"] = (time.perf_counter() - t0) * 1000
-    synthetic = _build_structured_evidence_candidate(structured)
-    if synthetic is not None:
-        candidates.insert(0, synthetic)
+    if documentos_habilitado:
+        candidates = await retrieve_rerank_boost(
+            collection_name=collection_name,
+            query=query,
+            dense_strategy_name=dense_strategy_name,
+            sparse_strategy_name=sparse_strategy_name,
+            rerank_strategy_name=rerank_strategy_name,
+            top_n=top_n,
+            timings=timings,
+            excluded_filenames=excluded_filenames,
+        )
+        # Se filtra ACÁ (antes de armar el prompt), no solo al construir
+        # `sources` más abajo — si no, el LLM seguía viendo en su contexto
+        # candidatos irrelevantes aunque la UI ya no los mostrara como fuentes,
+        # y a veces respondía con eso en vez de admitir que no tiene material
+        # para esa pregunta. Con la lista vacía, build_generation_prompt() cae
+        # en "(sin fragmentos recuperados)" y el system prompt le indica qué
+        # hacer en ese caso.
+        candidates = [c for c in candidates if c.get("rerank_score", 1.0) >= MIN_SOURCE_RELEVANCE]
+
+        # Índice de campos estructurados: si la pregunta apunta a un campo real
+        # de esta colección (descubierto de los datos, no de una lista fija —
+        # ver campos_estructurados.py), se inyecta como evidencia de alta
+        # confianza en el MISMO pool que compite/se cita junto con lo
+        # recuperado por Qdrant — no es una respuesta aparte. Ambiguo -> se
+        # preserva la contradicción explícitamente, nunca se elige un valor por
+        # mayoría. Insuficiente/no encontrado/colección sin índice -> no se
+        # toca nada, sigue el RAG normal sin este paso (siempre seguro: si la
+        # colección no tiene índice poblado en Postgres, structured_lookup()
+        # devuelve None de inmediato, sin excepción).
+        t0 = time.perf_counter()
+        try:
+            structured = await campos_estructurados.structured_lookup(
+                collection_name, query, dense_strategy_name=dense_strategy_name)
+        except Exception as e:
+            print(f"⚠️ structured_lookup falló (se ignora, sigue el RAG normal): {e}")
+            structured = None
+        timings["structured_lookup_ms"] = (time.perf_counter() - t0) * 1000
+        synthetic = _build_structured_evidence_candidate(structured)
+        # La evidencia estructurada también respeta las exclusiones del docente.
+        if (
+            synthetic is not None
+            and synthetic.get("payload", {}).get("filename") not in excluded_filenames
+        ):
+            candidates.insert(0, synthetic)
 
     # Query Router (Incremento 1 del agente híbrido, ver plan de esta
     # sesión) — reglas deterministas (regex) para preguntas de conteo/
@@ -574,16 +648,37 @@ async def answer_query(
     # (Course Map / Moodle real). Nunca usa el LLM para decidir la
     # respuesta en sí, solo para fraseársela al estudiante. Igual que
     # structured_lookup arriba: None = no aplica, sigue el RAG normal sin
-    # ningún cambio de comportamiento.
+    # ningún cambio de comportamiento. `funcionalidades`: si un intent
+    # pertenece a una funcionalidad apagada, devuelve un mensaje fijo.
     t0 = time.perf_counter()
     try:
-        routed = query_router.route(collection_name, course_id, query, user_id=user_id)
+        routed = query_router.route(
+            collection_name, course_id, query, user_id=user_id, funcionalidades=funcionalidades
+        )
     except Exception as e:
         print(f"⚠️ query_router falló (se ignora, sigue el RAG normal): {e}")
         routed = None
     timings["query_router_ms"] = (time.perf_counter() - t0) * 1000
     if routed is not None:
         candidates.insert(0, routed)
+    elif not documentos_habilitado:
+        # Sin documentos y sin respuesta determinista del router: no se
+        # llama al LLM ni se inventa nada a partir de fuentes inexistentes.
+        timings["total_ms"] = (time.perf_counter() - t_total) * 1000
+        return {
+            "answer": "Este asistente no está configurado para responder sobre los documentos del curso.",
+            "sources": [],
+            "tokens_consumidos": None,
+            "config_used": {
+                "dense": strategy_registry.resolve_strategy_name("dense", dense_strategy_name),
+                "sparse": strategy_registry.resolve_strategy_name("sparse", sparse_strategy_name),
+                "rerank": strategy_registry.resolve_strategy_name("rerank", rerank_strategy_name),
+                "generation": strategy_registry.resolve_strategy_name(
+                    "generation", generation_strategy_name
+                ),
+                "timings_ms": {k: round(v) for k, v in timings.items()},
+            },
+        }
 
     # Si el estudiante nombró una fuente puntual (reglamento/manual/sílabo/
     # archivo/...), se verifica por metadata real (filename) cuáles
@@ -608,6 +703,10 @@ async def answer_query(
     # confirmar" cuando en realidad el documento SÍ es el mismo indexado.
     if course_map_match is not None:
         resolved_filename = ledger.get_indexed_filename(collection_name, course_map_match["cmid"])
+        if resolved_filename is not None and resolved_filename in excluded_filenames:
+            # El docente excluyó ese documento: no se inyecta ni se cita.
+            resolved_filename = None
+            course_map_match = None
         if resolved_filename is not None:
             already_retrieved = any(
                 (c.get("payload", {}).get("filename") or "") == resolved_filename for c in candidates
@@ -634,6 +733,7 @@ async def answer_query(
     generator = strategy_registry.get_generation_strategy(generation_strategy_name)
     t0 = time.perf_counter()
     answer, tokens_consumidos = await generator.generate(system_prompt, user_prompt, history=history)
+    answer, urls_removidas = _remove_unbacked_urls(answer, candidates)
     timings["generation_ms"] = (time.perf_counter() - t0) * 1000
     timings["total_ms"] = (time.perf_counter() - t_total) * 1000
     print(
@@ -668,6 +768,7 @@ async def answer_query(
             "generation": strategy_registry.resolve_strategy_name(
                 "generation", generation_strategy_name
             ),
+            "urls_removidas": urls_removidas,
             "timings_ms": {k: round(v) for k, v in timings.items()},
         },
     }

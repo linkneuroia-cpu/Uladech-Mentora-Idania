@@ -10,18 +10,21 @@ determinístico solo en tabla/fila + tablas-plantilla sin partir en filas
 datos, no por caso aislado.
 """
 import asyncio
+import os
 import json
 
 import rag_pipeline
 from settings import settings
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 DENSE = "openai/text-embedding-3-small"
 SPARSE = "bm25"
 COLLECTIONS = ["Curso_1472", "Curso_1472_experiment_v2"]
 
-with open("eval_dataset_curso_1472.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_curso_1472.json"), encoding="utf-8") as f:
     MAIN_DATASET = json.load(f)
-with open("eval_dataset_curso_1472_adversarial.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_curso_1472_adversarial.json"), encoding="utf-8") as f:
     ADV_DATASET = json.load(f)
 
 
@@ -152,7 +155,7 @@ async def main():
             print(f"\n[{row['id']}] {row['question']}")
             print(f"  -> {row['answer'][:200]}")
 
-    with open("full_eval_comparison_results.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "full_eval_comparison_results.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
     print(f"\n\n{'='*90}\nCOMPARACIÓN FINAL\n{'='*90}")

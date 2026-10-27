@@ -9,15 +9,18 @@ encontraron los 3 bugs), en el mismo estilo que
 "Idania - 200 Pruebas de Alucinaciones (Espejo de Produccion).docx".
 """
 import json
+import os
 import docx
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-with open("evaluation_200_v2_summary.json", encoding="utf-8") as f:
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
+with open(os.path.join(EVAL_DIR, "evaluation_200_v2_summary.json"), encoding="utf-8") as f:
     S2 = json.load(f)
-with open("evaluation_200_hallucinations_summary.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "evaluation_200_hallucinations_summary.json"), encoding="utf-8") as f:
     S1 = json.load(f)
-with open("evaluation_200_v2_results.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "evaluation_200_v2_results.json"), encoding="utf-8") as f:
     R2 = json.load(f)
 
 CAT_LABELS = {
@@ -348,6 +351,7 @@ d.add_paragraph(
     "problema de alucinaciones resuelto."
 )
 
-out_path = "Data prueba/Idania - 200 Pruebas v2 (Ejemplos Nuevos, Post-Correcciones).docx"
+os.makedirs("doc", exist_ok=True)
+out_path = os.path.join("doc", "Idania - 200 Pruebas v2 (Ejemplos Nuevos, Post-Correcciones).docx")
 d.save(out_path)
 print("Guardado:", out_path)

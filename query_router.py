@@ -80,6 +80,20 @@ _CURRENT_WEEK_RE = re.compile(
     r"\b(en\s+qu[eé]\s+semana\s+(estamos|vamos|va)|semana\s+actual|esta\s+semana)\b",
     re.IGNORECASE,
 )
+# Variante sin "esta": "¿de qué trata el tema de la semana?" — bug real en
+# producción (23-sep-2026, curso 1472): al no decir "esta semana" no
+# matcheaba _CURRENT_WEEK_RE, caía a RAG y respondió la Semana 7 estando en
+# la 4. Dispara si hay una palabra de contenido (tema/trata/veremos/...) Y
+# la palabra "semana" SIN número ni referencia a otra semana (pasada,
+# próxima...) — con número ("semana 7") sigue yendo a RAG/estructurado.
+_CURRENT_WEEK_TOPIC_RE = re.compile(
+    r"(?=.*\b(tema|temas|trata|tratar[aá]|veremos|vemos|toca|corresponde|contenidos?|clase|sesi[oó]n)\b)"
+    r"(?=.*\bsemana\b(?!\s*(\d|pasada|anterior|siguiente|pr[oó]xima|que\s+viene)))"
+    # No dispara si nombra OTRA semana por ordinal/calificativo ("mi 2da
+    # semana", "la próxima semana", "semana pasada", "primera semana").
+    r"(?!.*(\d\s*(ra|da|er|era|ta|va|na|º|°)?\s*semana|\b(pr[oó]xima|pasada|anterior|siguiente|otra|primera|segunda|tercera|cuarta)\b))",
+    re.IGNORECASE,
+)
 # "¿qué me falta?" / "¿qué tengo pendiente?" / "actividades pendientes" —
 # progreso REAL del estudiante (Incremento 2, ya desbloqueado — ver
 # moodle_tools.MOODLE_COMPLETION_ENABLED). La última alternativa es
@@ -168,7 +182,37 @@ _DUE_DATES_RE = re.compile(
     r"|qu[eé]\s+(se\s+)?(me\s+)?vence"
     r"|fecha\s+l[ií]mite"
     r"|cu[aá]l\s+es\s+la\s+fecha\s+(de\s+)?(entrega|vencimiento)"
-    r"|fechas?\s+de\s+(entrega|vencimiento)",
+    r"|fechas?\s+de\s+(entrega|vencimiento)"
+    # "¿cuándo es el examen/evaluación de la unidad?" y "¿cuándo abre/cierra?"
+    # no matcheaban nada y caían a RAG (bug real del curso 1440: no daba la
+    # fecha real de la tarea de examen).
+    r"|cu[aá]ndo\s+es\s+(el|la)\s+(ex[aá]men|evaluaci[oó]n)"
+    r"|cu[aá]ndo\s+(abre|cierra|se\s+cierra)"
+    r"|hasta\s+cu[aá]ndo",
+    re.IGNORECASE,
+)
+# "semana N + qué archivos/materiales hay" — antes caía a RAG porque
+# _SECTION_CONTENT_WORDS_RE no incluía "archivos", "actividades", "tareas",
+# "evaluación" ni "examen". Incluye "caso" porque la pregunta real reportada
+# fue "Ayúdame con el caso para la semana 8".
+_SECTION_ASK_RE = re.compile(
+    r"(archivos?|materiales?|recursos?|documentos?|actividades?|tareas?"
+    r"|evaluaci[oó]n(es)?|ex[aá]men(es)?|lecturas?|contenidos?|casos?"
+    r"|qu[eé]\s+hay|qu[eé]\s+(puedo\s+)?revis(o|ar)|qu[eé]\s+toca"
+    r"|qu[eé]\s+(debo|tengo\s+que)\s+(hacer|revisar|estudiar))",
+    re.IGNORECASE,
+)
+# Exámenes/evaluaciones sumativas. Se usa solo cuando la pregunta NO nombra
+# una semana puntual (si la nombra, manda SECTION_CONTENTS). Exige una señal
+# de pregunta (cuándo/dónde/en qué semana/cuál/dame/hay…) junto al término:
+# sin eso, "el reglamento de proctoring para exámenes virtuales" o "cuánto
+# vale el examen" se responderían con la tabla de exámenes en vez de RAG.
+_ASSESSMENTS_RE = re.compile(
+    r"(?:cu[aá]ndo|d[oó]nde|en\s+qu[eé]\s+semana|cu[aá]l(?:es)?|dame|env[ií]a(?:me)?|"
+    r"pasa(?:me)?|mu[eé]stra(?:me)?|hay|existe)\b[^?.\n]*\b"
+    r"(?:ex[aá]men(?:es)?|evaluaci[oó]n\s+(?:de\s+(?:la\s+)?)?unidad|sumativ[oa]s?|parcial(?:es)?|final(?:es)?)\b"
+    r"|\b(?:ex[aá]men(?:es)?|evaluaci[oó]n\s+(?:de\s+(?:la\s+)?)?unidad|sumativ[oa]s?|parcial(?:es)?|final(?:es)?)\b"
+    r"[^?.\n]*\b(?:cu[aá]ndo|d[oó]nde|en\s+qu[eé]\s+semana|cu[aá]l(?:es)?|enlace|link|url)\b",
     re.IGNORECASE,
 )
 # "¿quién es el profesor/docente?" / "¿cuál es el correo/horario?" — datos
@@ -183,9 +227,45 @@ _TEACHER_INFO_RE = re.compile(
 )
 
 
-def _classify(query: str) -> Optional[Dict[str, Any]]:
+_ROMAN_UNIDAD_QR = {
+    "i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5,
+    "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+}
+
+
+def _unit_number(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    raw = raw.strip().lower()
+    if raw.isdigit():
+        return int(raw)
+    return _ROMAN_UNIDAD_QR.get(raw)
+
+
+def _week_reference(query: str, course_id: Optional[int] = None) -> Optional[int]:
+    """Número de semana al que se refiere la pregunta: explícito
+    ("semana 8"), o relativo ("próxima semana" / "semana pasada") resuelto
+    con la semana actual real del curso."""
+    m = re.search(r"\bsemana\s*0*(\d+)\b", query, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    relative = None
+    if re.search(r"\b(pr[oó]xima\s+semana|semana\s+que\s+viene)\b", query, re.IGNORECASE):
+        relative = 1
+    elif re.search(r"\b(semana\s+pasada|semana\s+anterior)\b", query, re.IGNORECASE):
+        relative = -1
+    if relative is None or course_id is None:
+        return None
+    current = cm.get_current_week_number(course_id)
+    if current.get("status") != "confident":
+        return None
+    return max(1, current["week_number"] + relative)
+
+
+def _classify(query: str, course_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Devuelve {"intent": ...} o None si ninguna regla determinista
-    matchea (el caller sigue con RAG)."""
+    matchea (el caller sigue con RAG). `course_id` solo se usa para resolver
+    referencias relativas a la semana ("próxima semana")."""
     m = _STRUCTURED_LAST_RE.search(query)
     if m:
         return {"intent": "STRUCTURED", "operation": "range", "entity": "unidad", "value": m.group(2), "want": "last"}
@@ -222,7 +302,7 @@ def _classify(query: str) -> Optional[Dict[str, Any]]:
         week_m = _WEEK_NUMBER_RE.search(query)
         return {"intent": "DUE_DATES", "section_number": int(week_m.group(1)) if week_m else None}
 
-    if _CURRENT_WEEK_RE.search(query):
+    if _CURRENT_WEEK_RE.search(query) or _CURRENT_WEEK_TOPIC_RE.search(query):
         return {"intent": "CURRENT_WEEK"}
 
     if _PROGRESS_RE.search(query):
@@ -238,6 +318,20 @@ def _classify(query: str) -> Optional[Dict[str, Any]]:
     if _STUDY_HELP_RE.search(query):
         week_m = _WEEK_NUMBER_RE.search(query)
         return {"intent": "STUDY_HELP", "section_number": int(week_m.group(1)) if week_m else None}
+
+    # "semana N + qué archivos/materiales hay" y "exámenes/evaluaciones".
+    # SECTION_CONTENTS va acá (después de los intents personales y de
+    # criterios) y antes de TEACHER_INFO/NAVIGATION. Si la pregunta menciona
+    # DOS semanas distintas ("compara la semana 12 con la 14") no es una
+    # consulta de contenido de una sección: sigue a RAG.
+    weeks_in_query = {int(n) for n in re.findall(r"\bsemana\s*0*(\d+)\b", query, re.IGNORECASE)}
+    multi_week = len(weeks_in_query) >= 2
+    week_n = _week_reference(query, course_id)
+    if not multi_week and _ASSESSMENTS_RE.search(query) and week_n is None:
+        unit_m = re.search(r"\bunidad\s+([ivx]+|\d+)\b", query, re.IGNORECASE)
+        return {"intent": "ASSESSMENTS", "unit": unit_m.group(1) if unit_m else None}
+    if not multi_week and week_n is not None and _SECTION_ASK_RE.search(query):
+        return {"intent": "SECTION_CONTENTS", "section_number": week_n}
 
     if _TEACHER_INFO_RE.search(query):
         return {"intent": "TEACHER_INFO"}
@@ -397,6 +491,32 @@ _SECTION_MODNAME_ES = {
     "resource": "Documento", "folder": "Carpeta", "url": "Enlace/Video",
     "assign": "Tarea", "quiz": "Cuestionario", "forum": "Foro", "label": "Texto", "page": "Página",
 }
+# Mapa público reutilizable (panel docente/admin) — misma fuente que usa el
+# Query Router, para no duplicar etiquetas.
+MODNAME_LABELS = dict(_SECTION_MODNAME_ES)
+
+
+def _short_date(ts) -> str:
+    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    return f"{dt.day:02d}/{dt.month:02d}"
+
+
+def _activity_dates_txt(a) -> str:
+    """Fechas reales de una actividad en formato corto ("Abre 20/10 ·
+    Cierra 26/10"), tal como las expone core_course_get_contents. Vacío si
+    no tiene."""
+    abreviaturas = {"Apertura": "Abre", "Cierre": "Cierra", "Vencimiento": "Vence"}
+    parts = []
+    for d in (a.dates or []):
+        ts = d.get("timestamp")
+        if not ts:
+            continue
+        label = d.get("label") or "Fecha"
+        try:
+            parts.append(f"{abreviaturas.get(label, label)} {_short_date(ts)}")
+        except (TypeError, ValueError, OSError):
+            continue
+    return " · ".join(parts)
 
 
 def _format_section_contents_evidence(course_id: int, section_number: int) -> Optional[Dict[str, Any]]:
@@ -406,25 +526,123 @@ def _format_section_contents_evidence(course_id: int, section_number: int) -> Op
     encontrado sin esto: esas preguntas caían a RAG, que a veces mezclaba
     contenido de OTRA semana (ej. mencionó un video de la Semana 13 al
     responder sobre la Semana 3) en vez de decir honestamente qué hay (o no
-    hay) en la semana real preguntada."""
+    hay) en la semana real preguntada.
+
+    Excluye las actividades ocultas para alumnos (`visible`/`uservisible`)
+    y las etiquetas: el estudiante no las ve, así que no deben listarse."""
     course = cm.get_course_map(course_id)
     section = next((s for s in course.sections if s.section_number == section_number), None)
     if section is None:
         return None
-    if not section.activities:
-        text = f"En \"{section.name}\" no hay ningún recurso o actividad registrado en Moodle."
+    acts = [
+        a for a in section.activities
+        if a.modname != "label" and a.visible and a.uservisible
+    ]
+    if not acts:
+        text = f"En \"{section.name}\" no hay ningún recurso o actividad visible registrado en Moodle."
         return _wrap_as_candidate(text=text, filename="Estructura real del curso (Moodle)", section_name=section.name)
-    rows = [[a.name, _SECTION_MODNAME_ES.get(a.modname, a.modname), a.url] for a in section.activities]
+
+    has_dates = any(a.dates for a in acts)
+    if has_dates:
+        rows = [
+            [a.name, _SECTION_MODNAME_ES.get(a.modname, a.modname), _activity_dates_txt(a), a.url]
+            for a in acts
+        ]
+        headers = ["Nombre", "Tipo", "Fechas", "Enlace"]
+    else:
+        rows = [[a.name, _SECTION_MODNAME_ES.get(a.modname, a.modname), a.url] for a in acts]
+        headers = ["Nombre", "Tipo", "Enlace"]
+
     lines = [
         f"Contenido REAL y COMPLETO de \"{section.name}\" según Moodle:",
-        _md_table(["Nombre", "Tipo", "Enlace"], rows),
+        _md_table(headers, rows),
         "IMPORTANTE: esta lista es completa y real — si el estudiante pregunta por un tipo de recurso "
         "puntual (video, artículo, evaluación, lectura, etc.) que NO aparece en esta tabla, decile "
         "honestamente que no hay ese tipo de recurso en esta sección, sin tomar un ejemplo de otra "
-        "semana ni inventar uno. Mantené el formato de tabla en tu respuesta.",
+        "semana ni inventar uno. Usá solamente los enlaces que aparecen en esta tabla: no uses enlaces "
+        "de otras semanas ni del historial de la conversación. Mantené el formato de tabla en tu respuesta.",
     ]
     text = "\n".join(lines)
     return _wrap_as_candidate(text=text, filename="Estructura real del curso (Moodle)", section_name=section.name)
+
+
+_ASSESSMENT_MODNAMES = {"assign", "quiz", "workshop"}
+
+
+def _date_label(a, labels) -> str:
+    for d in (a.dates or []):
+        if str(d.get("label") or "").strip().lower() in labels:
+            try:
+                return cm._format_date_es(int(d["timestamp"]))
+            except (KeyError, TypeError, ValueError, OSError):
+                continue
+    return "—"
+
+
+def _format_assessments_evidence(
+    course_id: int, query: str, unit: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Exámenes/evaluaciones sumativas reales del Course Map (assign/quiz/
+    workshop visibles), con su semana y sus fechas reales. Si la pregunta
+    nombra una unidad, filtra por esa unidad ("U1" o "Unidad I"). No cae a
+    RAG: si no hay examen visible, lo dice con un mensaje fijo."""
+    n_unit = _unit_number(unit)
+    qwords = mt._content_words(query)
+    course = cm.get_course_map(course_id)
+
+    found = []
+    for s in course.sections:
+        section_words = mt._content_words(s.name)
+        for a in s.activities:
+            if a.modname not in _ASSESSMENT_MODNAMES:
+                continue
+            if not a.visible or not a.uservisible:
+                continue
+            activity_words = mt._content_words(a.name)
+            words = activity_words | section_words
+            if n_unit is not None and str(n_unit) not in words:
+                continue
+            overlap = qwords & words
+            if not (overlap & {"examen", "evaluacion", "sumativo", "parcial", "final"}):
+                # Con una unidad explícita, cualquier tarea/cuestionario de
+                # esa unidad es una evaluación legítima.
+                if n_unit is None:
+                    continue
+            found.append((a, s, len(overlap)))
+
+    if not found:
+        msg = (
+            "En el aula no hay un examen visible para esa unidad todavía."
+            if n_unit is not None
+            else "En el aula no hay un examen visible todavía."
+        )
+        return _wrap_as_candidate(
+            text=msg, filename="Estructura real del curso (Moodle)", section_name="Evaluación"
+        )
+
+    found.sort(key=lambda x: (x[1].section_number, -x[2]))
+    rows = [
+        [
+            a.name,
+            _SECTION_MODNAME_ES.get(a.modname, a.modname),
+            f"Semana {s.section_number}" if s.section_number else "General",
+            _date_label(a, {"apertura"}),
+            _date_label(a, {"cierre", "vencimiento"}),
+            a.url or "—",
+        ]
+        for a, s, _ in found
+    ]
+    lines = [
+        "Evaluaciones REALES del aula según Moodle (solo actividades visibles):",
+        _md_table(["Nombre", "Tipo", "Semana", "Apertura", "Cierre", "Enlace"], rows),
+        "IMPORTANTE: usá exactamente estos nombres, fechas y enlaces. No inventes fechas ni tomes "
+        "enlaces de otras semanas ni del historial de la conversación. Mantené el formato de tabla.",
+    ]
+    return _wrap_as_candidate(
+        text="\n".join(lines),
+        filename="Estructura real del curso (Moodle)",
+        section_name="Evaluación",
+    )
 
 
 def _format_current_week_evidence(collection_name: str, course_id: int) -> Optional[Dict[str, Any]]:
@@ -790,6 +1008,32 @@ def _due_date_state(due_epoch: int, now_epoch: int) -> str:
     return "vencida" if due_epoch < now_epoch else "próxima"
 
 
+def _course_map_due_events(course_id: int) -> List[Dict[str, Any]]:
+    """Fechas reales por actividad desde el Course Map (respaldo del
+    calendario cuando no está disponible). Solo actividades visibles."""
+    course = cm.get_course_map(course_id)
+    events = []
+    for s in course.sections:
+        for a in s.activities:
+            if a.modname == "label" or not a.visible or not a.uservisible:
+                continue
+            if not a.dates:
+                continue
+            due = cm.activity_due(a)
+            if due is None:
+                try:
+                    due = int(a.dates[-1]["timestamp"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            events.append({
+                "name": a.name,
+                "due_epoch": int(due),
+                "due_date": cm._format_date_es(int(due)),
+                "section_number": s.section_number,
+            })
+    return events
+
+
 def _format_due_dates_evidence(
     course_id: int, section_number: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -799,19 +1043,29 @@ def _format_due_dates_evidence(
     … +7 días), ordena por fecha ascendente y marca cada fila como vencida/
     próxima. Si no hay vencimientos en la semana, lo dice y ofrece el
     listado completo — NUNCA devuelve todo el curso como si fuera de esa
-    semana. Si no hay fuente, degrada honestamente y no inventa fechas."""
-    result = mc.get_due_dates(course_id)
-    if result.get("status") == "unavailable":
-        text = (
-            "No tengo acceso a las fechas de entrega de este curso en este momento. No inventes ni "
-            "supongas ninguna fecha: decile al estudiante que confirme las fechas directamente en el "
-            "aula virtual."
-        )
-        return _wrap_as_candidate(text=text, filename="Fechas de entrega (Moodle)", section_name="No disponible")
-    if result.get("status") != "confident":
-        return None
+    semana. Si no hay fuente, degrada honestamente y no inventa fechas.
 
-    events = sorted(result["events"], key=lambda e: e["due_epoch"])
+    En producción el calendario suele estar `unavailable`, pero
+    core_course_get_contents ya trae las fechas (Apertura/Cierre) por
+    actividad: se usan como respaldo, solo para actividades visibles."""
+    result = mc.get_due_dates(course_id)
+    backup = _course_map_due_events(course_id)
+    source_note = ""
+    if result.get("status") != "confident":
+        if not backup:
+            if result.get("status") == "unavailable":
+                text = (
+                    "No tengo acceso a las fechas de entrega de este curso en este momento. No inventes ni "
+                    "supongas ninguna fecha: decile al estudiante que confirme las fechas directamente en el "
+                    "aula virtual."
+                )
+                return _wrap_as_candidate(text=text, filename="Fechas de entrega (Moodle)", section_name="No disponible")
+            return None
+        events = backup
+        source_note = " (desde la estructura real del aula en Moodle)"
+    else:
+        events = result["events"]
+    events = sorted(events, key=lambda e: e["due_epoch"])
     now_epoch = int(datetime.now(timezone.utc).timestamp())
 
     def _render(evs: List[Dict[str, Any]]) -> List[List[str]]:
@@ -840,7 +1094,7 @@ def _format_due_dates_evidence(
 
     if not scope_events:
         lines = [
-            f"Según Moodle, no hay vencimientos de actividades en {scope_label}{week_range_txt}.",
+            f"Según Moodle{source_note}, no hay vencimientos de actividades en {scope_label}{week_range_txt}.",
             "Vencimientos del curso completo (por si el estudiante quiere verlos):",
             _md_table(["Actividad", "Vence", "Estado"], _render(events)),
             "IMPORTANTE: aclarale al estudiante que NO hay vencimientos esa semana; el listado de arriba "
@@ -853,7 +1107,7 @@ def _format_due_dates_evidence(
         )
 
     lines = [
-        f"Fechas REALES de vencimiento en {scope_label}{week_range_txt} (según Moodle), ordenadas por fecha:",
+        f"Fechas REALES de vencimiento en {scope_label}{week_range_txt} (según Moodle{source_note}), ordenadas por fecha:",
         _md_table(["Actividad", "Vence", "Estado"], _render(scope_events)),
         "IMPORTANTE: usá exactamente estas fechas y este orden, sin inventar ni ajustar ninguna. La columna "
         "'Estado' marca si ya venció o está próxima. Mantené el formato de tabla en tu respuesta.",
@@ -893,18 +1147,55 @@ def _wrap_as_candidate(text: str, filename: str, section_name: str) -> Dict[str,
     }
 
 
+def _funcionalidad_deshabilitada(mensaje: str) -> Dict[str, Any]:
+    """Respuesta fija (formato de candidato, igual que los demás intents)
+    cuando el intent pertenece a una funcionalidad desactivada — así el
+    pipeline NO cae al RAG e inventa notas/fechas a partir de documentos."""
+    return _wrap_as_candidate(
+        text=(
+            "IMPORTANTE: respondé al estudiante EXACTAMENTE este mensaje, sin agregar "
+            f"nada más: \"{mensaje}\""
+        ),
+        filename="Funcionalidad deshabilitada",
+        section_name="Configuración del asistente",
+    )
+
+
+_INTENTS_NOTAS = {"GRADES", "PROGRESS"}
+_INTENTS_NAVEGACION = {
+    "NAVIGATION", "CURRENT_WEEK", "DUE_DATES", "SCHEDULE", "COURSE_DATE", "STUDY_HELP",
+    "SECTION_CONTENTS", "ASSESSMENTS",
+}
+
+
 def route(
-    collection_name: str, course_id: Optional[int], query: str, user_id: Optional[int] = None,
+    collection_name: str, course_id: Optional[int], query: str,
+    user_id: Optional[int] = None, funcionalidades: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Punto de entrada único. None si ninguna regla determinista aplica
     (o si el intent SÍ matchea pero la fuente determinista no tiene
     evidencia confidente) — en ambos casos el caller sigue con RAG normal
     sin ningún cambio de comportamiento. `user_id`: SIEMPRE el
     moodle_userid real de la sesión que pregunta (ver app.py), nunca de
-    otro estudiante — necesario para PROGRESS."""
-    parsed = _classify(query)
+    otro estudiante — necesario para PROGRESS.
+
+    `funcionalidades`: {"notas": bool, "navegacion": bool, ...} (None = todo
+    habilitado, comportamiento histórico). Si el intent pertenece a una
+    funcionalidad desactivada, devuelve un mensaje fijo como candidato (no
+    None) para que el pipeline no caiga a RAG."""
+    parsed = _classify(query, course_id)
     if parsed is None:
         return None
+
+    if funcionalidades is not None:
+        if not funcionalidades.get("notas", True) and parsed["intent"] in _INTENTS_NOTAS:
+            return _funcionalidad_deshabilitada(
+                "Esta funcionalidad (notas) no está habilitada en este asistente."
+            )
+        if not funcionalidades.get("navegacion", True) and parsed["intent"] in _INTENTS_NAVEGACION:
+            return _funcionalidad_deshabilitada(
+                "Esta funcionalidad (navegación del aula) no está habilitada en este asistente."
+            )
 
     if parsed["intent"] == "STRUCTURED":
         result = ce.structured_query(collection_name, {
@@ -927,6 +1218,12 @@ def route(
     try:
         if parsed["intent"] == "STUDY_HELP":
             return _format_study_help_evidence(collection_name, course_id, parsed.get("section_number"))
+
+        if parsed["intent"] == "SECTION_CONTENTS":
+            return _format_section_contents_evidence(course_id, parsed["section_number"])
+
+        if parsed["intent"] == "ASSESSMENTS":
+            return _format_assessments_evidence(course_id, query, parsed.get("unit"))
 
         if parsed["intent"] == "DUE_DATES":
             return _format_due_dates_evidence(course_id, parsed.get("section_number"))

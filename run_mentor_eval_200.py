@@ -13,6 +13,7 @@ Salidas: evaluation_200_results.json, evaluation_200_results.csv,
 evaluation_200_summary.json.
 """
 import asyncio
+import os
 import csv
 import json
 import math
@@ -26,6 +27,8 @@ from openai import OpenAI
 import rag_pipeline
 from settings import settings
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 DENSE = "openai/text-embedding-3-small"
 SPARSE = "bm25"
 COLLECTIONS = {"1472": "Curso_1472_experiment_v2", "1541": "Curso_1541_experiment_v2"}
@@ -36,7 +39,7 @@ _judge_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 _judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
 _gen_sem = asyncio.Semaphore(4)
 
-with open("eval_dataset_200_mentor.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_200_mentor.json"), encoding="utf-8") as f:
     DATASET = json.load(f)
 
 
@@ -223,7 +226,7 @@ async def main():
 
     results = await asyncio.gather(*[_guarded(item, i) for i, item in enumerate(DATASET)])
 
-    with open("evaluation_200_results.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "evaluation_200_results.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     # CSV plano (una fila por turno, incluidos multi-turno)
@@ -339,7 +342,7 @@ async def main():
             by_course[row["course_id"]]["pass"] += 1
     summary["by_course"] = {k: {**v, "pass_rate": v["pass"] / v["n"] if v["n"] else None} for k, v in by_course.items()}
 
-    with open("evaluation_200_summary.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "evaluation_200_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print(f"\n=== RESUMEN ===")

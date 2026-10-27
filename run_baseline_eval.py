@@ -12,16 +12,19 @@ Contextual Retrieval selectivo, etc.) sobre la MISMA colección de origen.
 Uso: venv/Scripts/python.exe run_baseline_eval.py
 """
 import asyncio
+import os
 import json
 
 import rag_pipeline
 from settings import settings
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 COLLECTION = "Curso_1472"
 DENSE = "openai/text-embedding-3-small"
 SPARSE = "bm25"
 
-with open("eval_dataset_curso_1472.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_curso_1472.json"), encoding="utf-8") as f:
     DATASET = json.load(f)
 
 
@@ -166,7 +169,7 @@ async def main():
         print(f"Abstención (n={len(abstentions)} preguntas sin respuesta en el material):")
         print(f"  Abstención correcta = {abstention_acc:.2%}")
 
-    with open("baseline_eval_results.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "baseline_eval_results.json"), "w", encoding="utf-8") as f:
         json.dump(
             {
                 "collection": COLLECTION,

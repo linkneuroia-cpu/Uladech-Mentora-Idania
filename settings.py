@@ -351,6 +351,24 @@ class Settings(BaseSettings):
     MOODLE_DB_USER: str = ""
     MOODLE_DB_PASSWORD: str = ""
 
+    # ================= ERP MySQL (cursos del docente) =================
+    # Solo lectura: view_matricula_cursos del periodo mas reciente. Si queda
+    # vacio, el login de docente por enlace falla de forma honesta (no hay
+    # cursos que resolver). Ver docentes.py.
+    ERP_MYSQL_HOST: str = ""
+    ERP_MYSQL_PORT: int = 3306
+    ERP_MYSQL_USER: str = ""
+    ERP_MYSQL_PASSWORD: str = ""
+    ERP_MYSQL_DB: str = ""
+
+    # ================= Login de docente (enlace desde Moodle) =================
+    # Token compartido que viaja en la URL que se pega como actividad URL en
+    # Moodle (?username=<documento>&token=<token>&userid=<id>). Secretos en
+    # el .env de produccion, nunca en el repo.
+    DOCENTE_LOGIN_TOKEN: str = ""
+    DOCENTE_DEFAULT_DENSE: str = "openai/text-embedding-3-small"
+    DOCENTE_DEFAULT_SPARSE: str = "bm25"
+
     # ================= LLM Generation & Vision (Pipeline RAG) =================
     # Todas opcionales — se validan de forma perezosa por estrategia (no
     # bloquean el arranque de la app si faltan; solo la estrategia que las

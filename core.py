@@ -18,6 +18,7 @@ pipeline configurable a partir de la configuración RAG activa
 cambios.
 """
 
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,6 +195,59 @@ def _fail_job(job_id: str, error: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# LIMPIEZA DE temp_docs/ (red de seguridad)
+# ═══════════════════════════════════════════════════════════════════
+# El cleanup normal borra cada archivo en el `finally` de
+# confirm_and_vectorize. Pero un archivo descargado que falla la validación
+# ANTES de entrar al job (p.ej. un .rar/.zip no soportado) nunca llegaba a
+# limpiarse y quedaba en temp_docs/ para siempre — el job periódico de
+# migración lo re-descargaba cada hora (ver migracion.py). Este barrido
+# borra esos huérfanos: cualquier archivo en TEMP_DIR más viejo que
+# `max_age_hours` que NO pertenezca a un job vivo (una migración puede
+# tardar en vectorizar; sus archivos están referenciados en job_store
+# mientras el job exista).
+
+def active_temp_paths() -> set:
+    """Rutas de archivos temporales referenciadas por jobs vivos (en
+    memoria). Tras un reinicio del proceso un job a medias desaparece y sus
+    archivos quedan huérfanos — el janitor los barre por antigüedad."""
+    paths = set()
+    for job in job_store.values():
+        ctx = job.get("context") or {}
+        for fd in ctx.get("files", []) or []:
+            p = fd.get("path") if isinstance(fd, dict) else None
+            if p:
+                paths.add(str(p))
+        single = ctx.get("file")
+        if isinstance(single, dict) and single.get("path"):
+            paths.add(str(single["path"]))
+    return paths
+
+
+def purge_stale_temp_files(max_age_hours: float = 6.0) -> int:
+    """Elimina archivos huérfanos de TEMP_DIR (ver nota arriba). Devuelve
+    cuántos se borraron. Nunca lanza: es una tarea de mantenimiento."""
+    temp_dir = Path(settings.TEMP_DIR)
+    if not temp_dir.exists():
+        return 0
+    active = active_temp_paths()
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for entry in temp_dir.iterdir():
+        try:
+            if not entry.is_file():
+                continue
+            if str(entry) in active:
+                continue
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+                removed += 1
+        except Exception as e:
+            print(f"⚠️ Janitor temp: no se pudo evaluar/eliminar {entry}: {e}")
+    return removed
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ASISTENTE SEMIAUTOMÁTICO
 # ═══════════════════════════════════════════════════════════════════
 
@@ -353,13 +407,17 @@ class AutoCore:
     @staticmethod
     def preview_course(
         curid: int,
-        collection_name: str,
+        collection_name: Optional[str],
         model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Consulta Moodle y retorna módulos con sus PDFs, incluyendo si cada PDF ya existe en la colección (duplicado).
+
+        `collection_name=None` (curso todavía sin colección) recorre Moodle
+        igual, pero no marca duplicados: se usa para listar "todos los
+        materiales" en el panel del docente antes de vectorizar.
         """
-        service = get_service(model_name)
+        service = get_service(model_name) if collection_name else None
         resources = get_course_resources(curid)
 
         modules = []
@@ -380,7 +438,10 @@ class AutoCore:
             files = []
             for cf in resource.get("contentfiles", []):
                 filename = cf["filename"]
-                dup = service.check_duplicate(filename, collection_name)
+                if service is not None:
+                    dup = service.check_duplicate(filename, collection_name)
+                else:
+                    dup = {"exists": False, "total_chunks": 0, "date": None, "source_type": None}
                 # timemodified: fecha real en que el archivo se subió/editó
                 # en Moodle (epoch Unix) — distinta de existing_date (fecha
                 # en que SE VECTORIZÓ). Se muestran ambas una al lado de la
@@ -502,6 +563,7 @@ class AutoCore:
                     filename if idx == 0
                     else _desambiguar_filename(filename, info["resource_id"])
                 )
+                temp_path = None
                 try:
                     pretranscribed_segments = None
                     if info.get("source") == "youtube":
@@ -535,6 +597,16 @@ class AutoCore:
                         temp_path = write_temp_text(effective_filename, scraped["text"])
                         val = await validate_document(str(temp_path))
                     else:
+                        if classify_file_type(effective_filename) == "other":
+                            # Formato no soportado (ej. .rar/.zip): antes se
+                            # descargaba igual, validate_document fallaba y el
+                            # archivo quedaba huérfano en temp_docs/ (y el job
+                            # periódico lo re-bajaba cada hora). Se corta acá,
+                            # sin tocar el disco.
+                            raise ValueError(
+                                f"Formato no soportado para vectorización: "
+                                f"'{Path(effective_filename).suffix}'"
+                            )
                         temp_path = download_pdf_to_temp(fileurl, effective_filename)
                         val = await validate_document(str(temp_path))
                     dup = service.check_duplicate(effective_filename, collection_name)
@@ -570,6 +642,12 @@ class AutoCore:
                     })
 
                 except Exception as e:
+                    # Un archivo que se alcanzó a descargar pero falló la
+                    # validación (corrupto, formato no soportado, etc.) NO
+                    # entra a `downloaded`, así que confirm_and_vectorize
+                    # nunca lo limpiaría -> se borra acá mismo.
+                    if temp_path is not None:
+                        cleanup_temp_file(temp_path)
                     summaries.append(ValidationSummary(
                         filename=effective_filename,
                         total_pages=0, total_images=0, total_tables=0,
@@ -670,6 +748,19 @@ class AutoCore:
                 results.append({"filename": filename, "success": False, "error": str(e)})
             finally:
                 cleanup_temp_file(file_path)
+
+        # Archivos con formato permanente no soportado (ej. .rar/.zip) salen
+        # de la cola de trabajo — si no, el job periódico los reintenta (y
+        # re-descarga) cada hora para siempre (ver ledger.marcar_no_soportado).
+        if curid:
+            for s in ctx.get("summaries", []) or []:
+                w = s.get("warning_message") or ""
+                if "Formato no soportado" in w:
+                    try:
+                        await db.run(ledger.marcar_no_soportado, collection_name, s["filename"])
+                        print(f"⏭️ Marcado no_soportado: {s['filename']}")
+                    except Exception as e:
+                        print(f"⚠️ No se pudo marcar no_soportado {s.get('filename')}: {e}")
 
         _sync_structured_index(collection_name, base_pipeline_config)
         _complete_job(job_id, {

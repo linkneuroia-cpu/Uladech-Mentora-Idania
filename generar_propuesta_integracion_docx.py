@@ -13,6 +13,8 @@ Salida:    Propuesta_Integracion_F1_F2_F3.docx
 
 Corresponde a la Parte D.3 del PLAN.md.
 """
+import os
+
 from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -308,7 +310,8 @@ def build():
         "concreto con el que se puede ilustrar el valor de la integración."
     )
 
-    out = "Propuesta_Integracion_F1_F2_F3.docx"
+    os.makedirs("doc", exist_ok=True)
+    out = os.path.join("doc", "Propuesta_Integracion_F1_F2_F3.docx")
     doc.save(out)
     print(f"OK -> {out}")
 

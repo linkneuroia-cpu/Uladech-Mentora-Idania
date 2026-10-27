@@ -1486,3 +1486,40 @@ def structured_query(collection_name: str, parsed: Dict[str, Any]) -> Optional[D
             return None
         return range_bounds(collection_name, group_field, entity, value, course_id=course_id)
     return None
+
+
+def list_rows(
+    collection_name: str,
+    document: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Listado paginado del índice de campos para el visor de admin.
+    `document` filtra por archivo; `q` busca en campo o valor."""
+    where = ["qdrant_collection_name = %s"]
+    params: List[Any] = [collection_name]
+    if document:
+        where.append("document_filename = %s")
+        params.append(document)
+    if q:
+        where.append("(field_raw ILIKE %s OR value_raw ILIKE %s)")
+        like = f"%{q}%"
+        params.extend([like, like])
+    clause = " AND ".join(where)
+    total_row = db.fetch_one(
+        f"SELECT COUNT(*) AS n FROM {TABLE_NAME} WHERE {clause}", tuple(params)
+    )
+    rows = db.fetch_all(
+        f"SELECT document_filename, document_type, chunk_type, field_raw, value_raw, "
+        f"value_normalized, section_heading, page, table_signature, is_repeated_template, "
+        f"source_type, row_id FROM {TABLE_NAME} WHERE {clause} "
+        f"ORDER BY document_filename, row_id, field_raw LIMIT %s OFFSET %s",
+        tuple(params) + (int(limit), int(offset)),
+    )
+    return {
+        "total": int((total_row or {}).get("n", 0)),
+        "limit": int(limit),
+        "offset": int(offset),
+        "rows": rows,
+    }

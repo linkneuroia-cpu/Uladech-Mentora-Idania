@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 
 import db
 
-ESTADOS = ("nuevo", "sin_cambios", "posible_actualizacion", "eliminado", "vectorizado")
+ESTADOS = ("nuevo", "sin_cambios", "posible_actualizacion", "eliminado", "vectorizado", "no_soportado")
 
 
 def sync_curso_archivos(collection_name: str, curid: int) -> Dict[str, Any]:
@@ -167,6 +167,20 @@ def marcar_vectorizado(collection_name: str, filename: str, document_hash: Optio
         "UPDATE curso_archivos SET estado='vectorizado', document_hash=%s, last_indexed_at=now(), updated_at=now() "
         "WHERE qdrant_collection_name=%s AND filename=%s",
         (document_hash, collection_name, filename),
+    )
+
+
+def marcar_no_soportado(collection_name: str, filename: str) -> None:
+    """Marca un archivo con formato permanente no soportado (ej. .rar/.zip)
+    para que SALGA de la cola de trabajo ('nuevo'/'posible_actualizacion').
+    Sin esto, el job periódico lo re-intenta (y re-descarga) en cada pasada
+    para siempre. Si el archivo cambia en Moodle, sync_curso_archivos lo
+    vuelve a marcar 'posible_actualizacion' y se reintenta — así no se pierde
+    un archivo que el docente reemplace por uno soportado."""
+    db.execute(
+        "UPDATE curso_archivos SET estado='no_soportado', updated_at=now() "
+        "WHERE qdrant_collection_name=%s AND filename=%s",
+        (collection_name, filename),
     )
 
 

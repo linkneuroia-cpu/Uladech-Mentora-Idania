@@ -7,15 +7,18 @@ Mismo estilo/tono que los demás informes en Data prueba/ (Título, Heading 1,
 párrafos Normal, tablas "Light Grid Accent 1").
 """
 import json
+import os
 from pathlib import Path
 
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 ROOT = Path(__file__).parent
-DATA = json.loads((ROOT / "evaluate_vectorization_results.json").read_text(encoding="utf-8"))
-OUT = ROOT / "Data prueba" / "Idania - Evaluacion de Vectorizacion (1472 y 1541).docx"
+DATA = json.loads((ROOT / "tests" / "eval" / "evaluate_vectorization_results.json").read_text(encoding="utf-8"))
+OUT = ROOT / "doc" / "Idania - Evaluacion de Vectorizacion (1472 y 1541).docx"
 
 C1472 = DATA["Curso_1472"]
 C1541 = DATA["Curso_1541"]
@@ -416,5 +419,6 @@ doc.add_paragraph(
     "pueda verificarse de nuevo corriendo el script contra el mismo mirror local."
 )
 
+os.makedirs(OUT.parent, exist_ok=True)
 doc.save(str(OUT))
 print(f"Guardado: {OUT}")

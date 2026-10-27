@@ -53,7 +53,7 @@ av==12.3.0
 psycopg2-binary==2.9.12
 itsdangerous==2.2.0
 
-# NOTA: PyMySQL (driver de solo lectura para la DB de Moodle, usado por
-# moodle_calendar.py) se instala en el Dockerfile en su propio RUN, no acá —
-# así el cambio no invalida la capa cacheada de pip (que reinstala todo
-# torch/easyocr, varios GB) en cada deploy.
+# ── ERP MySQL de solo lectura (cursos del docente, ver docentes.py) ──
+# También lo instala el Dockerfile en su propio RUN para no invalidar la capa
+# cacheada de pip durante un deploy; queda declarado acá para desarrollo local.
+PyMySQL==1.1.1

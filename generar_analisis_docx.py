@@ -7,6 +7,8 @@ proyecto "Sistema de Vectorización Documental v2 / Gestor RAG ULADECH".
 Ejecutar:  python generar_analisis_docx.py
 Salida:    Analisis_Proyecto_Gestor_RAG.docx
 """
+import os
+
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -375,8 +377,10 @@ def build():
         "asistentes y estrategias de IA sin reescribir el sistema."
     )
 
-    doc.save("Analisis_Proyecto_Gestor_RAG.docx")
-    print("Documento generado: Analisis_Proyecto_Gestor_RAG.docx")
+    os.makedirs("doc", exist_ok=True)
+    out = os.path.join("doc", "Analisis_Proyecto_Gestor_RAG.docx")
+    doc.save(out)
+    print(f"Documento generado: {out}")
 
 
 if __name__ == "__main__":

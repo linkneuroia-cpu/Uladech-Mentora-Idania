@@ -73,11 +73,36 @@ def _strip_accents_lower(text: str) -> str:
 
 _STOPWORDS = {"el", "la", "los", "las", "de", "del", "en", "y", "a", "un", "una", "para", "con", "que"}
 
+# Alias genéricos del vocabulario académico (no de un curso puntual): la
+# pregunta y el nombre real de la actividad se normalizan por igual antes de
+# comparar, para que "examen de la unidad I" coincida con
+# "U1-Ex-Examen sumativo".
+_ROMAN_UNIDAD = {
+    "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5",
+    "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+}
+
+
+def _normalize_aliases(text: str) -> str:
+    t = _strip_accents_lower(text)
+    t = re.sub(r"\bu\s*-?\s*(\d+)\b", lambda m: f"unidad {m.group(1)}", t)
+    t = re.sub(
+        r"\bunidad\s+([ivx]+)\b",
+        lambda m: f"unidad {_ROMAN_UNIDAD.get(m.group(1), m.group(1))}",
+        t,
+    )
+    t = re.sub(r"\bex\b", "examen", t)
+    t = re.sub(r"\bef\b", "evaluacion formativa", t)
+    t = re.sub(r"\baf\b", "actividad formativa", t)
+    return t
+
 
 def _content_words(text: str) -> set:
-    normalized = _strip_accents_lower(text)
+    normalized = _normalize_aliases(text)
     words = re.findall(r"[a-z0-9]+", normalized)
-    return {w for w in words if w not in _STOPWORDS and len(w) > 2}
+    # Se conservan los números de un dígito ("unidad 1") porque distinguen
+    # una unidad de otra; el resto sigue el criterio de longitud.
+    return {w for w in words if w not in _STOPWORDS and (len(w) > 2 or w.isdigit())}
 
 
 def find_activity(course_id: int, query: str) -> List[Dict[str, Any]]:
@@ -98,6 +123,10 @@ def find_activity(course_id: int, query: str) -> List[Dict[str, Any]]:
     for s in course.sections:
         section_words = _content_words(s.name)
         for a in s.activities:
+            # Las actividades ocultas para alumnos y las etiquetas no se
+            # muestran ni se resuelven como recurso (decisión del curso).
+            if a.modname == "label" or not a.visible or not a.uservisible:
+                continue
             activity_words = _content_words(a.name)
             overlap = query_words & (activity_words | section_words)
             score = len(overlap) / max(len(query_words), 1)
@@ -117,12 +146,13 @@ def find_activity(course_id: int, query: str) -> List[Dict[str, Any]]:
 # rol que _STOPWORDS: lenguaje natural genérico, no contenido curado de un
 # curso puntual.
 _MODNAME_WORDS = {
-    "tarea": "assign", "tareas": "assign", "actividad": "assign",
-    "cuestionario": "quiz", "examen": "quiz", "quiz": "quiz",
-    "foro": "forum",
-    "carpeta": "folder",
-    "video": "url", "enlace": "url", "link": "url",
-    "material": "resource", "recurso": "resource", "lectura": "resource",
+    "tarea": {"assign"}, "tareas": {"assign"}, "actividad": {"assign"},
+    "cuestionario": {"quiz"}, "examen": {"assign", "quiz"}, "evaluacion": {"assign", "quiz"},
+    "quiz": {"quiz"},
+    "foro": {"forum"},
+    "carpeta": {"folder"},
+    "video": {"url"}, "enlace": {"url"}, "link": {"url"},
+    "material": {"resource"}, "recurso": {"resource"}, "lectura": {"resource"},
 }
 
 _ORDINAL_LAST = {"ultima", "ultimo", "final"}
@@ -137,10 +167,10 @@ def find_first_activity(course_id: int, query: str) -> Optional[Dict[str, Any]]:
     — nunca inventa cuál es "la primera", se basa en el orden real del
     curso en Moodle."""
     words = _content_words(query)
-    target_modname = None
+    target_modnames: Optional[set] = None
     for w in words:
         if w in _MODNAME_WORDS:
-            target_modname = _MODNAME_WORDS[w]
+            target_modnames = _MODNAME_WORDS[w]
             break
     want_last = bool(words & _ORDINAL_LAST) and not (words & _ORDINAL_FIRST)
 
@@ -150,7 +180,9 @@ def find_first_activity(course_id: int, query: str) -> Optional[Dict[str, Any]]:
         if s.section_number == 0:
             continue  # 'General' no es parte de la secuencia semanal del curso
         for a in s.activities:
-            if target_modname and a.modname != target_modname:
+            if a.modname == "label" or not a.visible or not a.uservisible:
+                continue
+            if target_modnames and a.modname not in target_modnames:
                 continue
             candidates.append({
                 "cmid": a.cmid, "name": a.name, "modname": a.modname, "url": a.url,

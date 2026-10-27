@@ -6,14 +6,17 @@ fix de \\[ \\] multilinea, tablas DOCX/PDF, pix2tex con GPU, sesiones/
 carpetas y token editable. Mismo patron que run_format_qa_tests.py.
 """
 import json
+import os
 import requests
+
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
 
 BASE = "http://localhost:8100"
 TOKEN = "XF7MaBrGZG8r_tEeK1r6MqKB_OXIQPKp"
 COURSEID = 1396
 USERID = 9999
 
-with open("qa_final_test_questions.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "qa_final_test_questions.json"), encoding="utf-8") as f:
     questions = json.load(f)
 
 grupos = [questions[0:10], questions[10:20]]
@@ -54,7 +57,7 @@ for grupo in grupos:
         estado = "OK" if resultado.get("ok") else f"FALLO"
         print(f"  [{q['id']:2}] {estado} - {q['pregunta'][:60]}")
 
-with open("qa_final_test_results.json", "w", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "qa_final_test_results.json"), "w", encoding="utf-8") as f:
     json.dump(resultados, f, ensure_ascii=False, indent=2)
 
 print(f"\nTotal resultados: {len(resultados)} -> qa_final_test_results.json")

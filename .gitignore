@@ -13,6 +13,8 @@ runtime_config.json
 # Contiene credenciales reales de servidores en texto plano (ver su propio
 # encabezado) — nunca commitear.
 PLAN.md
+Server uladech.txt
+Servidor linkneuroia.txt
 
 # Material de referencia de diseño (no forma parte de la app, es pesado)
 3_wowdash-tailwind-css-admin-dashboard-template-*.zip

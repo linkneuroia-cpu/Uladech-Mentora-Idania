@@ -12,6 +12,7 @@ usando el mismo LLM-juez estricto de grounding que run_eval_200_hallucinations.p
 Salidas: evaluation_200_v2_results.json/.csv, evaluation_200_v2_summary.json.
 """
 import asyncio
+import os
 import csv
 import json
 import time
@@ -23,6 +24,8 @@ from openai import OpenAI
 import rag_pipeline
 from settings import settings
 
+EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "eval")
+
 DENSE = "openai/text-embedding-3-small"
 SPARSE = "bm25"
 COLLECTIONS = {"Curso_1472": "Curso_1472", "Curso_1541": "Curso_1541"}
@@ -33,7 +36,7 @@ _judge_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 _judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
 _gen_sem = asyncio.Semaphore(4)
 
-with open("eval_dataset_200_v2.json", encoding="utf-8") as f:
+with open(os.path.join(EVAL_DIR, "eval_dataset_200_v2.json"), encoding="utf-8") as f:
     DATASET = json.load(f)
 
 JUDGE_SYSTEM = """Eres un evaluador experto de un tutor/mentor académico universitario (RAG) llamado Idania.
@@ -139,7 +142,7 @@ async def main():
 
     results = await asyncio.gather(*[_guarded(item, i) for i, item in enumerate(DATASET)])
 
-    with open("evaluation_200_v2_results.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "evaluation_200_v2_results.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     rows = []
@@ -199,7 +202,7 @@ async def main():
         for row in rows if row.get("verdict") in ("fail", "partial") or row.get("hallucination") is True
     ]
 
-    with open("evaluation_200_v2_summary.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(EVAL_DIR, "evaluation_200_v2_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print("\n=== RESUMEN ===")

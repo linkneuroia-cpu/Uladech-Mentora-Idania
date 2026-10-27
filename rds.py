@@ -311,9 +311,42 @@ def set_curso_activo(entry_id: int, activo: bool) -> Dict[str, Any]:
 def resolve_collection_normal(moodle_courseid: int) -> Optional[str]:
     """Igual que resolve_collection pero para una colección "normal" (sin
     RD) — usado por asistentes "normal", que resuelven directamente por su
-    propio courseid en vez de RD+courseid."""
+    propio courseid en vez de RD+courseid.
+
+    A diferencia de las colecciones con RD (donde el índice único
+    (rd_id, moodle_courseid) garantiza una sola fila), una colección
+    "normal" se identifica por courseid con `rd_id IS NULL`, y Postgres
+    trata cada NULL como distinto en ese índice — así que borrar y recrear
+    la colección deja filas viejas con `qdrant_collection_name = NULL`
+    (ver unlink_collection) que NO se deben resolver. Sin el filtro/orden,
+    un `fetch_one` podía devolver una de esas filas muertas y el asistente
+    reportaba "no hay colección asignada" aunque la colección real exista.
+    """
     row = db.fetch_one(
-        "SELECT qdrant_collection_name FROM colecciones WHERE rd_id IS NULL AND moodle_courseid = %s",
+        "SELECT qdrant_collection_name FROM colecciones "
+        "WHERE rd_id IS NULL AND moodle_courseid = %s AND qdrant_collection_name IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (moodle_courseid,),
+    )
+    return row["qdrant_collection_name"] if row else None
+
+
+def resolve_collection_para_curso(moodle_courseid: int) -> Optional[str]:
+    """Colección que efectivamente sirve a un curso, sea "normal" (creada
+    para ese curso) o de una RD (el curso pertenece a un aula RD).
+
+    Antes los endpoints del docente solo miraban `resolve_collection_normal`,
+    así que un curso de RD aparecía sin colección aunque la RD sí tuviera la
+    suya (p.ej. Curso_1472 en la RD 13). Se prefiere la normal si existiera
+    (una colección propia del curso) y, si no, la colección no nula más
+    reciente de la RD que incluye ese courseid."""
+    name = resolve_collection_normal(moodle_courseid)
+    if name:
+        return name
+    row = db.fetch_one(
+        "SELECT qdrant_collection_name FROM colecciones "
+        "WHERE moodle_courseid = %s AND rd_id IS NOT NULL AND qdrant_collection_name IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
         (moodle_courseid,),
     )
     return row["qdrant_collection_name"] if row else None

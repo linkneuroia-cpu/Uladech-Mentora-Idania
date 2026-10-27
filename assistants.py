@@ -37,7 +37,7 @@ _CALIF_SUBQUERY = """
             ROUND(AVG(m.calificacion) FILTER (WHERE m.calificacion IS NOT NULL)::numeric, 2) AS calificacion_promedio
      FROM asistente_mensajes m
      JOIN asistente_sesiones s ON s.id = m.sesion_id
-     WHERE m.rol = 'assistant'
+     WHERE m.rol = 'assistant' AND s.es_prueba = FALSE
      GROUP BY s.asistente_id) c
 """
 
@@ -58,6 +58,7 @@ def get_calificaciones_por_curso(asistente_id: int) -> Dict[str, Any]:
         FROM asistente_mensajes m
         JOIN asistente_sesiones s ON s.id = m.sesion_id
         WHERE m.rol = 'assistant' AND m.calificacion IS NOT NULL AND s.asistente_id = %s
+          AND s.es_prueba = FALSE
         GROUP BY s.moodle_courseid
         ORDER BY s.moodle_courseid
         """,
@@ -118,6 +119,32 @@ def get_asistente_by_token(token: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def get_asistente_normal_por_courseid(courseid: int) -> Optional[Dict[str, Any]]:
+    """Asistente "normal" (sin RD) vinculado a un courseid — el que crea el
+    docente. Prefiere el más reciente si hubiera más de uno histórico."""
+    return db.fetch_one(
+        "SELECT * FROM asistentes WHERE rd_id IS NULL AND moodle_courseid = %s "
+        "ORDER BY id DESC LIMIT 1",
+        (courseid,),
+    )
+
+
+def get_asistente_para_curso(courseid: int) -> Optional[Dict[str, Any]]:
+    """Asistente que efectivamente sirve a un curso: primero el "normal" de
+    ese curso; si no, el asistente activo de la RD a la que pertenece el
+    curso (todas las aulas de una RD comparten el mismo asistente)."""
+    normal = get_asistente_normal_por_courseid(courseid)
+    if normal:
+        return normal
+    return db.fetch_one(
+        "SELECT a.* FROM asistentes a "
+        "JOIN colecciones c ON c.rd_id = a.rd_id "
+        "WHERE c.moodle_courseid = %s AND a.rd_id IS NOT NULL AND a.activo = TRUE "
+        "ORDER BY a.id DESC LIMIT 1",
+        (courseid,),
+    )
+
+
 _STRATEGY_FIELDS = (
     "etl_document_strategy",
     "etl_audio_strategy",
@@ -163,6 +190,9 @@ def create_asistente(
     mensaje_bienvenida: Optional[str] = None,
     mensaje_reencuentro: Optional[str] = None,
     max_actividades_sesion: int = 10,
+    func_notas: bool = True,
+    func_documentos: bool = True,
+    func_navegacion: bool = True,
     token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """`rd_id=None`: asistente "normal", sin RD — resuelve su única
@@ -192,13 +222,15 @@ def create_asistente(
         "(nombre, rd_id, moodle_courseid, prompt_maestro, token, created_by, "
         "etl_document_strategy, etl_audio_strategy, contextual_strategy, "
         "rerank_strategy, generation_strategy, dense_strategy, sparse_strategy, "
-        "mensaje_bienvenida, mensaje_reencuentro, max_actividades_sesion) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+        "mensaje_bienvenida, mensaje_reencuentro, max_actividades_sesion, "
+        "func_notas, func_documentos, func_navegacion) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
         (
             nombre, rd_id, moodle_courseid, prompt_maestro, token, created_by,
             etl_document_strategy, etl_audio_strategy, contextual_strategy,
             rerank_strategy, generation_strategy, dense_strategy, sparse_strategy, mensaje_bienvenida,
             mensaje_reencuentro, max_actividades_sesion,
+            func_notas, func_documentos, func_navegacion,
         ),
     )
     return _decorate(row)
@@ -221,6 +253,9 @@ def update_asistente(
     mensaje_bienvenida: Any = _UNSET,
     mensaje_reencuentro: Any = _UNSET,
     max_actividades_sesion: Optional[int] = None,
+    func_notas: Any = _UNSET,
+    func_documentos: Any = _UNSET,
+    func_navegacion: Any = _UNSET,
     token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Los campos de estrategia (y mensaje_bienvenida/mensaje_reencuentro)
@@ -272,12 +307,20 @@ def update_asistente(
     mensaje_reencuentro_value = (
         existing["mensaje_reencuentro"] if mensaje_reencuentro is _UNSET else mensaje_reencuentro
     )
+    func_notas_value = existing.get("func_notas", True) if func_notas is _UNSET else func_notas
+    func_documentos_value = (
+        existing.get("func_documentos", True) if func_documentos is _UNSET else func_documentos
+    )
+    func_navegacion_value = (
+        existing.get("func_navegacion", True) if func_navegacion is _UNSET else func_navegacion
+    )
 
     row = db.execute_returning(
         "UPDATE asistentes SET nombre=%s, rd_id=%s, moodle_courseid=%s, prompt_maestro=%s, activo=%s, "
         "etl_document_strategy=%s, etl_audio_strategy=%s, contextual_strategy=%s, "
         "rerank_strategy=%s, generation_strategy=%s, dense_strategy=%s, sparse_strategy=%s, "
-        "mensaje_bienvenida=%s, mensaje_reencuentro=%s, max_actividades_sesion=%s, token=%s, "
+        "mensaje_bienvenida=%s, mensaje_reencuentro=%s, max_actividades_sesion=%s, "
+        "func_notas=%s, func_documentos=%s, func_navegacion=%s, token=%s, "
         "updated_at=now() WHERE id=%s RETURNING *",
         (
             nombre if nombre is not None else existing["nombre"],
@@ -289,11 +332,99 @@ def update_asistente(
             mensaje_bienvenida_value,
             mensaje_reencuentro_value,
             max_actividades_sesion if max_actividades_sesion is not None else existing["max_actividades_sesion"],
+            func_notas_value, func_documentos_value, func_navegacion_value,
             token if token else existing["token"],
             asistente_id,
         ),
     )
     return _decorate(row)
+
+
+# ── Documentos excluidos (el docente decidió no usarlos al responder) ──────
+# Scoped por (asistente, curso): un asistente de RD comparte varias aulas, y
+# las exclusiones de un docente no deben afectar a las demás.
+
+def get_excluded_filenames(asistente_id: int, moodle_courseid: int) -> list:
+    rows = db.fetch_all(
+        "SELECT filename FROM asistente_documentos_excluidos "
+        "WHERE asistente_id = %s AND moodle_courseid = %s ORDER BY filename",
+        (asistente_id, moodle_courseid),
+    )
+    return [r["filename"] for r in rows]
+
+
+def set_excluded_filenames(
+    asistente_id: int,
+    moodle_courseid: int,
+    filenames: list,
+    excluido_por: Optional[int] = None,
+) -> list:
+    """Reemplaza la lista de documentos excluidos DE ESE CURSO (transacción)."""
+    limpios = sorted({(f or "").strip() for f in filenames if (f or "").strip()})
+    with db._cursor() as cur:
+        cur.execute(
+            "DELETE FROM asistente_documentos_excluidos "
+            "WHERE asistente_id = %s AND moodle_courseid = %s",
+            (asistente_id, moodle_courseid),
+        )
+        for fn in limpios:
+            cur.execute(
+                "INSERT INTO asistente_documentos_excluidos "
+                "(asistente_id, moodle_courseid, filename, excluido_por) VALUES (%s, %s, %s, %s)",
+                (asistente_id, moodle_courseid, fn, excluido_por),
+            )
+    return limpios
+
+
+# ── Configuración por curso (overrides del docente, sin tocar el asistente
+# global / la RD): funcionalidades, máximo de mensajes y activación. ──────
+
+def get_curso_config(asistente_id: int, moodle_courseid: int) -> Optional[Dict[str, Any]]:
+    return db.fetch_one(
+        "SELECT * FROM asistente_curso_config WHERE asistente_id = %s AND moodle_courseid = %s",
+        (asistente_id, moodle_courseid),
+    )
+
+
+def upsert_curso_config(
+    asistente_id: int,
+    moodle_courseid: int,
+    func_notas: Optional[bool] = None,
+    func_documentos: Optional[bool] = None,
+    func_navegacion: Optional[bool] = None,
+    max_actividades_sesion: Optional[int] = None,
+    activo: Optional[bool] = None,
+    updated_by: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Crea/actualiza el override de ESE curso. Los campos no informados
+    conservan el valor del override existente o, si no hay, el del asistente
+    global (nunca modifica `asistentes` ni la RD)."""
+    asistente = db.fetch_one("SELECT * FROM asistentes WHERE id = %s", (asistente_id,))
+    if not asistente:
+        raise ValueError(f"El asistente {asistente_id} no existe")
+    actual = get_curso_config(asistente_id, moodle_courseid) or {}
+    notas = func_notas if func_notas is not None else actual.get("func_notas", asistente.get("func_notas", True))
+    docs = func_documentos if func_documentos is not None else actual.get("func_documentos", asistente.get("func_documentos", True))
+    nav = func_navegacion if func_navegacion is not None else actual.get("func_navegacion", asistente.get("func_navegacion", True))
+    maxa = (
+        max_actividades_sesion
+        if max_actividades_sesion is not None
+        else actual.get("max_actividades_sesion", asistente.get("max_actividades_sesion", 10))
+    )
+    act = activo if activo is not None else actual.get("activo", True)
+    return db.execute_returning(
+        "INSERT INTO asistente_curso_config "
+        "(asistente_id, moodle_courseid, func_notas, func_documentos, func_navegacion, "
+        "max_actividades_sesion, activo, updated_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (asistente_id, moodle_courseid) DO UPDATE SET "
+        "func_notas = EXCLUDED.func_notas, func_documentos = EXCLUDED.func_documentos, "
+        "func_navegacion = EXCLUDED.func_navegacion, "
+        "max_actividades_sesion = EXCLUDED.max_actividades_sesion, "
+        "activo = EXCLUDED.activo, updated_by = EXCLUDED.updated_by, updated_at = now() "
+        "RETURNING *",
+        (asistente_id, moodle_courseid, notas, docs, nav, maxa, act, updated_by),
+    )
 
 
 def get_asistente_config_for_collection(qdrant_collection_name: str) -> Optional[Dict[str, Any]]:
@@ -435,18 +566,23 @@ def get_or_create_sesion(
     qdrant_collection_name: str,
     saludo_inicial: Optional[str] = None,
     force_new: bool = False,
+    es_prueba: bool = False,
+    probado_por: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Reusa la sesión existente para (asistente, curso, usuario) si hay una,
     si no crea una nueva. Así el historial se acumula por usuario/curso.
     `force_new=True` (botón "Nueva conversación") salta la reutilización y
     siempre inserta una sesión nueva, sin arrastrar la memoria anterior.
     `saludo_inicial`: si se crea una sesión nueva, se guarda como su primer
-    mensaje (rol assistant) — así el saludo queda en el historial real."""
+    mensaje (rol assistant) — así el saludo queda en el historial real.
+    `es_prueba`: las conversaciones del botón "Probar chat" NO se mezclan
+    con las reales del mismo userid (se filtra también al reutilizar)."""
     if not force_new:
         existing = db.fetch_one(
-            "SELECT * FROM asistente_sesiones WHERE asistente_id=%s AND moodle_courseid=%s AND moodle_userid=%s "
+            "SELECT * FROM asistente_sesiones WHERE asistente_id=%s AND moodle_courseid=%s "
+            "AND moodle_userid=%s AND es_prueba=%s "
             "ORDER BY started_at DESC LIMIT 1",
-            (asistente_id, moodle_courseid, moodle_userid),
+            (asistente_id, moodle_courseid, moodle_userid, es_prueba),
         )
         if existing:
             db.execute("UPDATE asistente_sesiones SET last_activity_at = now() WHERE id = %s", (existing["id"],))
@@ -454,9 +590,13 @@ def get_or_create_sesion(
 
     sesion = db.execute_returning(
         "INSERT INTO asistente_sesiones "
-        "(asistente_id, moodle_courseid, moodle_userid, moodle_username, moodle_fullname, qdrant_collection_name) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-        (asistente_id, moodle_courseid, moodle_userid, moodle_username, moodle_fullname, qdrant_collection_name),
+        "(asistente_id, moodle_courseid, moodle_userid, moodle_username, moodle_fullname, "
+        "qdrant_collection_name, es_prueba, probado_por) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+        (
+            asistente_id, moodle_courseid, moodle_userid, moodle_username, moodle_fullname,
+            qdrant_collection_name, es_prueba, probado_por,
+        ),
     )
     if saludo_inicial:
         save_mensaje(sesion["id"], "assistant", saludo_inicial)
@@ -468,19 +608,36 @@ def get_sesion(sesion_id: int) -> Optional[Dict[str, Any]]:
 
 
 def list_sesiones(asistente_id: int, moodle_courseid: int, moodle_userid: int) -> List[Dict[str, Any]]:
-    """Todas las conversaciones de un alumno con este asistente en este
-    curso, más recientes primero, con una vista previa (su primer mensaje).
-    Usado por la sidebar de historial de la página pública. Incluye
-    `nombre` (renombre manual, NULL si no se renombró) y `carpeta_id`
-    (NULL si no está en ninguna carpeta)."""
+    """Todas las conversaciones reales de un alumno con este asistente en
+    este curso (las de prueba se excluyen), más recientes primero, con una
+    vista previa (su primer mensaje). Incluye `nombre` y `carpeta_id`."""
     return db.fetch_all(
         "SELECT s.id, s.started_at, s.last_activity_at, s.nombre, s.carpeta_id, "
         "  (SELECT contenido FROM asistente_mensajes m WHERE m.sesion_id = s.id AND m.rol = 'user' "
         "   ORDER BY m.created_at ASC LIMIT 1) AS preview "
         "FROM asistente_sesiones s "
         "WHERE s.asistente_id = %s AND s.moodle_courseid = %s AND s.moodle_userid = %s "
+        "  AND s.es_prueba = FALSE "
         "ORDER BY s.last_activity_at DESC",
         (asistente_id, moodle_courseid, moodle_userid),
+    )
+
+
+def list_pruebas_por_curso(
+    asistente_id: int, moodle_courseid: int, limit: int = 5
+) -> List[Dict[str, Any]]:
+    """Conversaciones de PRUEBA de un curso (pestaña Resumen del docente):
+    fecha, quién probó, número de preguntas y primera pregunta."""
+    return db.fetch_all(
+        "SELECT s.id, s.started_at, s.last_activity_at, s.probado_por, "
+        "  u.nombre AS probado_por_nombre, u.username AS probado_por_username, "
+        "  (SELECT COUNT(*) FROM asistente_mensajes m WHERE m.sesion_id = s.id AND m.rol = 'user') AS preguntas, "
+        "  (SELECT contenido FROM asistente_mensajes m WHERE m.sesion_id = s.id AND m.rol = 'user' "
+        "   ORDER BY m.created_at ASC LIMIT 1) AS primera_pregunta "
+        "FROM asistente_sesiones s LEFT JOIN usuarios u ON u.id = s.probado_por "
+        "WHERE s.asistente_id = %s AND s.moodle_courseid = %s AND s.es_prueba = TRUE "
+        "ORDER BY s.last_activity_at DESC LIMIT %s",
+        (asistente_id, moodle_courseid, int(limit)),
     )
 
 
@@ -565,18 +722,27 @@ def split_welcome(historial_rows: List[Dict[str, Any]]) -> Tuple[Optional[str], 
     return None, historial_rows
 
 
-def get_recent_history(sesion_id: int, max_pairs: int = 30) -> List[Dict[str, str]]:
+def get_recent_history(
+    sesion_id: int, max_pairs: int = 6, max_age_hours: int = 6,
+) -> List[Dict[str, str]]:
     """Últimos `max_pairs` turnos (pregunta+respuesta, hasta `2*max_pairs`
     filas crudas) de la sesión, en orden cronológico, listos para pasar
     como historial real de conversación al LLM (no como texto aplanado).
     Usado por /asistente/{token}/mensaje ANTES de guardar la pregunta
-    actual, para no duplicarla en el historial."""
+    actual, para no duplicarla en el historial.
+
+    `max_age_hours` acota el historial a las últimas horas (por defecto 6):
+    antes se mandaban hasta 30 pares sin límite de tiempo y una conversación
+    de días atrás contaminaba la respuesta con enlaces y temas viejos
+    (bug real del curso 1440: copió la tabla de la semana 7 al preguntar por
+    la semana 8)."""
     rows = db.fetch_all(
         "SELECT rol, contenido FROM ("
         "  SELECT rol, contenido, created_at FROM asistente_mensajes "
-        "  WHERE sesion_id = %s ORDER BY created_at DESC LIMIT %s"
+        "  WHERE sesion_id = %s AND created_at >= now() - (%s * interval '1 hour') "
+        "  ORDER BY created_at DESC LIMIT %s"
         ") sub ORDER BY created_at",
-        (sesion_id, max_pairs * 2),
+        (sesion_id, max_age_hours, max_pairs * 2),
     )
     return [{"role": r["rol"], "content": r["contenido"]} for r in rows]
 

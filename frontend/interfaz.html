@@ -361,6 +361,41 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
 .bc span{color:var(--blue-650);font-weight:500}
 .ci{display:flex;gap:8px}
 .ci input{flex:1}
+
+/* ── Panel del docente ── */
+.doc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.doc-detail-hdr{position:sticky;top:var(--header-h);z-index:60;background:#fff;padding:10px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--neutral-300)}
+.doc-tabs{display:flex;gap:4px;margin-top:10px;border-bottom:1px solid var(--neutral-300);overflow-x:auto}
+.doc-tab{padding:9px 14px;font-size:12.5px;font-weight:600;color:var(--gray-500);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+.doc-tab.active{color:var(--blue-800);border-color:var(--blue-800)}
+.kn-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.kn-chip{padding:5px 10px;border-radius:999px;border:1px solid var(--neutral-300);cursor:pointer;font-size:12px;background:#fff}
+.kn-chip.active{background:var(--blue-800);color:#fff;border-color:var(--blue-800)}
+.kn-week{border:1px solid var(--neutral-300);border-radius:var(--radius);margin-bottom:8px;background:#fff}
+.kn-week-hdr{display:flex;gap:8px;align-items:center;padding:10px 12px;cursor:pointer;font-size:13px}
+.kn-week-hdr .fh{margin-left:auto}
+.kn-arrow{transition:transform .15s}
+.kn-week.open .kn-arrow{transform:rotate(180deg)}
+.kn-week-body{display:none;border-top:1px solid var(--neutral-200)}
+.kn-week.open .kn-week-body{display:block}
+.kn-row{display:grid;grid-template-columns:minmax(160px,1fr) auto auto auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--neutral-100)}
+.kn-row:first-child{border-top:none}
+.doc-savebar{position:fixed;left:var(--sidebar-w);right:0;bottom:0;z-index:150;background:#fff;border-top:1px solid var(--neutral-300);box-shadow:0 -4px 12px rgba(0,0,0,.08);padding:10px 16px;display:flex;gap:12px;align-items:center;justify-content:space-between}
+.doc-savebar .btn{min-height:38px}
+.nav-timeline{margin-top:10px}
+.nav-sec{border:1px solid var(--neutral-300);border-radius:var(--radius);margin-bottom:8px;background:#fff}
+.nav-sec-current{border-color:var(--blue-800);box-shadow:0 0 0 2px rgba(31,59,115,.12)}
+.nav-sec-hdr{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;cursor:pointer}
+.nav-num{width:28px;height:28px;border-radius:50%;background:var(--blue-800);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0}
+.nav-sec-hidden{opacity:.6}
+.nav-tipo{margin:8px 12px}
+.nav-act{padding:5px 0;border-top:1px dashed var(--neutral-200);font-size:13px}
+.nav-act-hidden{opacity:.55}
+.nav-resumen{white-space:pre-wrap}
+.func-card .fh{margin-top:2px}
+@media(max-width:600px){.nav-sec-hdr{flex-wrap:wrap}}
+@media(max-width:900px){.doc-savebar{left:0}}
+@media(max-width:600px){.kn-row{grid-template-columns:1fr;gap:6px}.doc-tab{padding:10px 12px}.doc-detail-hdr{position:static}}
 </style>
 </head>
 <body>
@@ -384,7 +419,8 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   </div>
 
   <div class="hdr-right">
-    <span class="hdr-badge">{{ user.username if user else '' }}</span>
+    <span class="hdr-badge">{{ (user.nombre or user.username) if user else '' }}</span>
+    {% if user %}<span class="hdr-badge">{{ 'Administrador' if (user.rol == 'admin' or user.is_admin) else 'Docente' }}</span>{% endif %}
     <span class="hdr-badge">v2.0</span>
     <button class="hdr-collapse-btn" onclick="logout()" title="Cerrar sesión" aria-label="Cerrar sesión" style="display:flex">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
@@ -400,6 +436,10 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
   <div class="sb-lbl">Vectorización</div>
+  <div class="nav" onclick="showMod('docente')" id="nav-docente" style="display:none">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M2 7l10-5 10 5-10 5-10-5z"/><path d="M6 10v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5"/></svg>
+    <span class="nav-lbl">Mis cursos</span>
+  </div>
   <div class="nav active" onclick="showMod('semi')" id="nav-semi">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
     <span class="nav-lbl">Semiautomático</span>
@@ -471,6 +511,10 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
     <span class="nav-lbl">Usuarios</span>
   </div>
+  <div class="nav" onclick="showMod('conocimiento')" id="nav-conocimiento">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2zM22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+    <span class="nav-lbl">Conocimiento del curso</span>
+  </div>
   <div class="nav" onclick="showMod('cfg-keys');credLoad()" id="nav-cfg-keys">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
     <span class="nav-lbl">Claves de API</span>
@@ -478,11 +522,47 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   {% endif %}
   <div class="sb-foot">
     <span>API Docs: <a href="{{ URL_PREFIX }}/docs" target="_blank">/docs</a></span>
-    <span style="margin-top:4px;display:block;">Sesión: {{ user.username if user else '' }}</span>
+    <span style="margin-top:4px;display:block;">Sesión: {{ (user.nombre or user.username) if user else '' }}{% if user %} · {{ 'Administrador' if (user.rol == 'admin' or user.is_admin) else 'Docente' }}{% endif %}</span>
   </div>
 </nav>
 
 <main class="main">
+<!-- ═══ MIS CURSOS (docente) ═══ -->
+<section class="mod" id="mod-docente">
+  <div class="mod-hdr">
+    <h1><div class="accent" style="background:var(--blue-700)"></div>Mis cursos</h1>
+    <p>Cursos del periodo actual. Crea y configura el asistente de cada uno.</p>
+  </div>
+  <div id="doc-cursos"><div class="card"><p class="muted">Cargando…</p></div></div>
+</section>
+
+<!-- ═══ CONOCIMIENTO DEL CURSO (admin) ═══ -->
+<section class="mod" id="mod-conocimiento">
+  <div class="mod-hdr">
+    <h1><div class="accent" style="background:var(--blue-700)"></div>Qué sabe el asistente del curso</h1>
+    <p>Visor de solo lectura de lo que el sistema guardó y usa para responder.</p>
+  </div>
+  <div class="card">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">
+      <div class="fg" style="min-width:150px"><label class="fl">Course ID</label><input class="fc" id="kn-courseid" type="number" placeholder="Ej. 1472"></div>
+      <div class="fg" style="min-width:220px"><label class="fl">Colección (opcional)</label><input class="fc" id="kn-col" placeholder="Curso_1472"></div>
+      <button class="btn btn-prim" onclick="knLoad()" style="height:38px">Ver</button>
+    </div>
+    <div class="fh">Si no se indica colección, se resuelve por el Course ID. Cada pestaña carga por separado.</div>
+  </div>
+  <div class="card" id="kn-card" style="display:none">
+    <div class="fb" style="gap:6px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="knTab('estructura')">Estructura</button>
+      <button class="btn btn-ghost btn-sm" onclick="knTab('general')">Datos generales</button>
+      <button class="btn btn-ghost btn-sm" onclick="knTab('campos')">Campos de tablas</button>
+      <button class="btn btn-ghost btn-sm" onclick="knTab('fechas')">Fechas</button>
+      <button class="btn btn-ghost btn-sm" onclick="knTab('archivos')">Archivos</button>
+      <button class="btn btn-ghost btn-sm" onclick="knTab('autoridad')">Autoridad</button>
+    </div>
+    <div id="kn-body" style="margin-top:16px"><p class="muted">Elige una pestaña.</p></div>
+  </div>
+</section>
+
 <!-- ═══ SEMIAUTOMÁTICO ═══ -->
 <section class="mod active" id="mod-semi">
   <div class="mod-hdr">
@@ -602,6 +682,13 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
           <option value="">— Selecciona una colección —</option>
         </select>
         <div class="fh">El tipo de contenido (material del curso / bibliografía) se elige por archivo en el paso 3.</div>
+      </div>
+      <div class="fg">
+        <label class="fl">Modelo de embeddings</label>
+        <select class="fc" id="auto-model" onchange="S.auto.modelName=this.value">
+          <option value="">Usar el valor por defecto del sistema</option>
+        </select>
+        <div class="fh">Debe coincidir con el embedding de la colección destino, o la vectorización fallará por incompatibilidad de dimensiones.</div>
       </div>
       <div class="btn-grp"><button class="btn btn-auto" id="btn-a1" disabled onclick="aGo(2)">Continuar →</button></div>
     </div>
@@ -988,7 +1075,22 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
         <button class="btn btn-prim btn-sm" onclick="asisWizardOpen()">+ Crear asistente</button>
       </span>
     </div>
-    <div class="tw"><table><thead><tr><th>Nombre</th><th>RD</th><th>Estado</th><th>URL pública</th><th>Calificación</th><th>Acciones</th></tr></thead><tbody id="asis-tbl"><tr><td colspan="6" class="muted">Cargando…</td></tr></tbody></table></div>
+    <div class="fb" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <input class="fc" id="asis-search" style="max-width:240px" placeholder="Buscar por nombre, curso o RD…" oninput="asisLoad()">
+      <select class="fc" id="asis-filter" style="max-width:240px" onchange="asisLoad()">
+        <option value="all">Funcionalidad: todas</option>
+        <option value="docs_on">Documentos activo</option>
+        <option value="nav_on">Navegabilidad activa</option>
+        <option value="notas_on">Notas activas</option>
+        <option value="any_off">Alguna apagada</option>
+      </select>
+      <select class="fc" id="asis-view" style="max-width:240px" onchange="asisLoad()">
+        <option value="asistente">Ver por: Asistente</option>
+        <option value="funcion">Ver por: Funcionalidad</option>
+      </select>
+    </div>
+    <div class="tw"><table><thead><tr><th>Nombre</th><th>RD / Curso</th><th>Funcionalidades</th><th>Estado</th><th>URL pública</th><th>Calificación</th><th>Acciones</th></tr></thead><tbody id="asis-tbl"><tr><td colspan="7" class="muted">Cargando…</td></tr></tbody></table></div>
+    <div id="asis-func-view" class="hidden"></div>
   </div>
 </section>
 
@@ -1146,18 +1248,25 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   <div class="card">
     <div class="card-ttl">Crear usuario</div>
     <div class="form-grid" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
-      <div class="fg" style="flex:1;min-width:160px"><label class="fl">Usuario</label><input class="fc" id="usr-new-username"></div>
-      <div class="fg" style="flex:1;min-width:160px"><label class="fl">Contraseña</label><input class="fc" type="password" id="usr-new-password"></div>
-      <div class="fg" style="min-width:140px">
+      <div class="fg" style="flex:1;min-width:160px"><label class="fl">Usuario</label><input class="fc" id="usr-new-username" placeholder="Para docentes: el documento"></div>
+      <div class="fg" style="flex:1;min-width:160px"><label class="fl">Contraseña <span class="muted">— admin</span></label><input class="fc" type="password" id="usr-new-password"></div>
+      <div class="fg" style="flex:1;min-width:150px"><label class="fl">Documento <span class="muted">— docente</span></label><input class="fc" id="usr-new-documento" placeholder="DNI del docente"></div>
+      <div class="fg" style="flex:1;min-width:150px"><label class="fl">Nombre</label><input class="fc" id="usr-new-nombre"></div>
+      <div class="fg" style="min-width:150px">
         <label class="fl">Rol</label>
-        <select class="fc" id="usr-new-isadmin"><option value="false">Usuario normal</option><option value="true">Administrador</option></select>
+        <select class="fc" id="usr-new-rol"><option value="admin">Administrador</option><option value="docente">Docente</option></select>
       </div>
       <button class="btn btn-prim" onclick="usrCreate()" style="height:38px">Crear</button>
+    </div>
+    <div class="alert a-info" style="margin-top:12px">
+      Enlace para pegar en Moodle como actividad URL (variables de URL <code>username</code> y <code>userid</code>):
+      <code>{{ URL_PREFIX }}/login?username=&lt;documento&gt;&amp;token=&lt;DOCENTE_LOGIN_TOKEN&gt;&amp;userid=&lt;id&gt;</code>
+      <div class="fh">No muestres el token real en la interfaz. Un docente sin contraseña no puede entrar por el formulario.</div>
     </div>
   </div>
   <div class="card">
     <div class="fb card-ttl"><span>Listado</span><button class="btn btn-ghost btn-sm" onclick="usrLoad()">Actualizar</button></div>
-    <div class="tw"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Creado</th><th>Último acceso</th><th>Acciones</th></tr></thead><tbody id="usr-tbl"><tr><td colspan="5" class="muted">Cargando…</td></tr></tbody></table></div>
+    <div class="tw"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Nombre</th><th>Creado</th><th>Último acceso</th><th>Acciones</th></tr></thead><tbody id="usr-tbl"><tr><td colspan="6" class="muted">Cargando…</td></tr></tbody></table></div>
   </div>
 </section>
 </main>
@@ -1171,7 +1280,7 @@ input[type=checkbox],input[type=radio]{width:15px;height:15px;accent-color:var(-
   </div>
 </div>
 <script>
-const S={semi:{col:'',files:[],jobId:null,sourceType:'curso_propio'},auto:{col:'',curid:null,mods:[],sel:[],typeFilter:null,jobId:null,fileSourceTypes:{}},upd:{col:'',doc:null,src:'manual',file:null,mFile:null,mMods:[],typeFilter:null,mCurid:null,mCourseName:null,jobId:null,sourceType:'curso_propio'}};
+const S={semi:{col:'',files:[],jobId:null,sourceType:'curso_propio'},auto:{col:'',curid:null,mods:[],sel:[],typeFilter:null,jobId:null,fileSourceTypes:{},modelName:''},upd:{col:'',doc:null,src:'manual',file:null,mFile:null,mMods:[],typeFilter:null,mCurid:null,mCourseName:null,jobId:null,sourceType:'curso_propio'}};
 
 function aFileSourceType(filename){return S.auto.fileSourceTypes[filename]||'curso_propio'}
 function aSetFileSourceType(filename,value){S.auto.fileSourceTypes[filename]=value}
@@ -1316,7 +1425,7 @@ function poll(id,onOk,onErr,ms=2500){
 
 // ── Nav ──
 const ALL_MODS=['semi','auto','upd','search','rd','coursemap','asis-list','llmtest',
-  'cfg-keys',
+  'cfg-keys','docente','conocimiento',
   'qdrant-dash','qdrant-cols','qdrant-crear','qdrant-verificar','qdrant-endpoints','usuarios'];
 
 function showMod(name){
@@ -1352,29 +1461,35 @@ async function logout(){
 async function usrLoad(){
   const tbl=$('usr-tbl');
   if(!tbl)return;
-  tbl.innerHTML='<tr><td colspan="5" class="muted">Cargando…</td></tr>';
+  tbl.innerHTML='<tr><td colspan="6" class="muted">Cargando…</td></tr>';
   try{
     const d=await api('{{ URL_PREFIX }}/api/usuarios');
     const us=d.usuarios||[];
     tbl.innerHTML=us.map(u=>`
       <tr>
-        <td><strong>${esc(u.username)}</strong></td>
-        <td>${u.is_admin?'<span class="tag t-new">Administrador</span>':'<span class="tag" style="background:var(--neutral-200);color:var(--gray-600)">Usuario</span>'}</td>
+        <td><strong>${esc(u.username)}</strong>${u.documento?`<div class="fh">Doc: ${esc(u.documento)}</div>`:''}</td>
+        <td>${u.rol==='admin'?'<span class="tag t-new">Administrador</span>':'<span class="tag" style="background:var(--neutral-200);color:var(--gray-600)">Docente</span>'}</td>
+        <td>${esc(u.nombre||'—')}</td>
         <td>${esc((u.created_at||'').slice(0,10))}</td>
         <td>${u.last_login?esc(u.last_login.slice(0,16).replace('T',' ')):'—'}</td>
         <td><button class="btn btn-danger btn-sm" onclick='usrDelete(${u.id},${JSON.stringify(u.username)})'>Eliminar</button></td>
-      </tr>`).join('')||'<tr><td colspan="5" class="muted">Sin usuarios</td></tr>';
-  }catch(e){tbl.innerHTML=`<tr><td colspan="5" class="muted">${esc(e.message)}</td></tr>`}
+      </tr>`).join('')||'<tr><td colspan="6" class="muted">Sin usuarios</td></tr>';
+  }catch(e){tbl.innerHTML=`<tr><td colspan="6" class="muted">${esc(e.message)}</td></tr>`}
 }
 
 async function usrCreate(){
   const username=$('usr-new-username').value.trim();
   const password=$('usr-new-password').value;
-  const isAdmin=$('usr-new-isadmin').value==='true';
-  if(!username||!password){showModal('Campos requeridos','<p>Ingresa usuario y contraseña.</p>');return;}
+  const documento=$('usr-new-documento').value.trim();
+  const nombre=$('usr-new-nombre').value.trim();
+  const rol=$('usr-new-rol').value;
+  if(rol==='docente'&&!documento){showModal('Campos requeridos','<p>Un docente se crea con su documento.</p>');return;}
+  if(rol==='admin'&&(!username||!password)){showModal('Campos requeridos','<p>Ingresa usuario y contraseña.</p>');return;}
   try{
-    await api('{{ URL_PREFIX }}/api/usuarios',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password,is_admin:isAdmin})});
-    $('usr-new-username').value='';$('usr-new-password').value='';
+    await api('{{ URL_PREFIX }}/api/usuarios',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      username, password:password||null, rol, documento:documento||null, nombre:nombre||null, is_admin:rol==='admin',
+    })});
+    ['usr-new-username','usr-new-password','usr-new-documento','usr-new-nombre'].forEach(id=>{const el=$(id);if(el)el.value='';});
     usrLoad();
   }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
 }
@@ -1629,7 +1744,7 @@ async function rdDeleteConfirmed(id){
 }
 
 // ═══ COURSE MAP (estructura real de Moodle) ═══
-const MODNAME_ICON={resource:'📄',folder:'📁',url:'🔗',assign:'📝',quiz:'❓',forum:'💬',label:'🏷️',page:'📃'};
+const MODNAME_ICON={resource:'📄',folder:'📁',url:'🔗',assign:'📝',quiz:'❓',forum:'💬',label:'🏷️',page:'📃',book:'📘',lesson:'📚',workshop:'🛠️'};
 function cmRenderGeneral(courseid, collection, data){
   const idx=data.campos_generales_indexados||[];
   let html='';
@@ -1851,17 +1966,42 @@ async function asisCfgCreateColeccionConfirm(rdId,returnFn){
   }
 }
 
+function asisFuncField(id){return id==='docs'?'func_documentos':id==='nav'?'func_navegacion':'func_notas';}
+function asisFuncChips(a){
+  const defs=[['docs','📚','Documentos'],['nav','🧭','Navegabilidad'],['notas','📊','Notas']];
+  return defs.map(([key,icon,label])=>{
+    const on=a[asisFuncField(key)]!==false;
+    return `<span class="tag" style="margin-right:4px;${on?'':'opacity:.45;text-decoration:line-through'}">${icon} ${label}</span>`;
+  }).join('');
+}
+function asisPasaFiltro(a,search,filter){
+  const txt=(search||'').toLowerCase();
+  if(txt&&!((a.nombre||'').toLowerCase().includes(txt)||String(a.moodle_courseid||'').includes(txt)||(a.rd_nombre||'').toLowerCase().includes(txt)))return false;
+  if(filter==='docs_on'&&a.func_documentos===false)return false;
+  if(filter==='nav_on'&&a.func_navegacion===false)return false;
+  if(filter==='notas_on'&&a.func_notas===false)return false;
+  if(filter==='any_off'&&!(a.func_documentos===false||a.func_navegacion===false||a.func_notas===false))return false;
+  return true;
+}
 async function asisLoad(){
   const tbl=$('asis-tbl');
   if(!tbl)return;
-  tbl.innerHTML='<tr><td colspan="6" class="muted">Cargando…</td></tr>';
+  tbl.innerHTML='<tr><td colspan="7" class="muted">Cargando…</td></tr>';
   try{
     const d=await api('{{ URL_PREFIX }}/api/asistentes');
-    const list=d.asistentes||[];
+    const all=d.asistentes||[];
+    const search=($('asis-search')&&$('asis-search').value||'').trim();
+    const filter=$('asis-filter')?$('asis-filter').value:'all';
+    const view=$('asis-view')?$('asis-view').value:'asistente';
+    const list=all.filter(a=>asisPasaFiltro(a,search,filter));
+    if(view==='funcion'){asisRenderFuncView(list);return;}
+    const fv=$('asis-func-view');if(fv)fv.classList.add('hidden');
+    const tw=tbl.closest('.tw');if(tw)tw.classList.remove('hidden');
     tbl.innerHTML=list.map(a=>`
       <tr>
         <td><strong>${esc(a.nombre)}</strong></td>
         <td>${a.tipo==='rd'?esc(a.rd_nombre||'—'):`<span class="muted">📦 Normal · ${a.moodle_courseid?`curso ${a.moodle_courseid}`:'sin curso (institucional)'}</span>`}</td>
+        <td>${asisFuncChips(a)}</td>
         <td>${a.activo?'<span class="tag t-new">Activo</span>':'<span class="tag t-warn">Inactivo</span>'}</td>
         <td><a href="${esc(a.public_url)}" target="_blank" style="font-family:monospace;font-size:11px">${esc(a.public_url)}</a></td>
         <td>${a.calificaciones_total
@@ -1871,8 +2011,32 @@ async function asisLoad(){
           <button class="btn btn-ghost btn-sm" onclick="asisEditOpen(${a.id})">Editar</button>
           <button class="btn btn-danger btn-sm" onclick='asisDelete(${a.id},${JSON.stringify(a.nombre)})'>Eliminar</button>
         </td>
-      </tr>`).join('')||'<tr><td colspan="6" class="muted">Sin asistentes creados</td></tr>';
-  }catch(e){tbl.innerHTML=`<tr><td colspan="6" class="muted">${esc(e.message)}</td></tr>`}
+      </tr>`).join('')||'<tr><td colspan="7" class="muted">Sin asistentes creados</td></tr>';
+  }catch(e){tbl.innerHTML=`<tr><td colspan="7" class="muted">${esc(e.message)}</td></tr>`}
+}
+function asisRenderFuncView(list){
+  const tw=$('asis-tbl');
+  const wrap=tw&&tw.closest('.tw');
+  if(wrap)wrap.classList.add('hidden');
+  const fv=$('asis-func-view');
+  if(!fv)return;
+  fv.classList.remove('hidden');
+  fv.innerHTML=[['docs','📚 Documentos'],['nav','🧭 Navegabilidad del aula'],['notas','📊 Notas']].map(([key,label])=>{
+    const field=asisFuncField(key);
+    const on=list.filter(a=>a[field]!==false);
+    const off=list.filter(a=>a[field]===false);
+    const row=a=>`<div class="fb" style="padding:5px 0;border-top:1px dashed var(--neutral-200)">
+      <span>${esc(a.nombre)} ${a.rd_nombre?`<span class="fh">${esc(a.rd_nombre)}</span>`:''}${a.tipo==='rd'?' <span class="fh">(valor global · puede tener ajustes por aula)</span>':''}</span>
+      <label class="fh"><input type="checkbox" ${a[field]!==false?'checked':''} onchange="asisToggleFunc(${a.id},'${field}',this.checked)"> activo</label></div>`;
+    return `<div class="card" style="margin-bottom:10px"><div class="card-ttl">${label} · ${on.length} activo(s) · ${off.length} apagado(s)</div>
+      ${on.map(row).join('')||'<p class="muted">Ninguno activo.</p>'}${off.map(row).join('')}</div>`;
+  }).join('');
+}
+async function asisToggleFunc(id,field,checked){
+  try{
+    await api('{{ URL_PREFIX }}/api/asistentes/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({[field]:checked})});
+    asisLoad();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
 }
 
 // Promedio de calificación (-1..1) de los alumnos -> "Sin calificaciones" si
@@ -1902,18 +2066,27 @@ async function asisCalifOpen(id){
 }
 
 // ── Wizard de creación (5 fases, marcadas conforme se completan) ──
-const ASIS_WIZ_STEPS=['Datos básicos','Configuración RAG','Curso','Prompt maestro','Revisar y crear'];
+const ASIS_WIZ_STEPS=['Curso','Identidad','Funcionalidades','Avanzado (opcional)','Revisar y crear'];
 let ASIS_WIZ=null;
 
 async function asisWizardOpen(){
   ASIS_WIZ={
-    step:1,maxStep:1,nombre:'',token:null,tipo:'rd',rd_id:null,rds:[],
+    step:1,maxStep:1,nombre:'Idania',token:null,tipo:'normal',rd_id:null,rds:[],
     normalTieneCurso:true,normalCourseId:null,normalCourseName:null,normalCollection:null,
+    normalDenseStrategy:null,normalSparseStrategy:null,
     promptMaestro:'',mensajeBienvenida:'',mensajeReencuentro:'',maxActividades:10,
-    cfg:{},
+    funcNotas:true,funcDocumentos:true,funcNavegacion:true,vectorizarAlCrear:true,
+    cfg:{},plantilla:{},defaults:{},
   };
   showModalWide('Crear asistente','<div id="wiz-body"><p class="muted">Cargando…</p></div>');
   try{ const d=await api('{{ URL_PREFIX }}/api/rds'); ASIS_WIZ.rds=d.rds||[]; }catch(e){}
+  try{ ASIS_WIZ.plantilla=await api('{{ URL_PREFIX }}/api/asistentes/plantilla')||{}; }catch(e){}
+  try{ ASIS_WIZ.defaults=await api('{{ URL_PREFIX }}/api/config/defaults-asistente')||{}; }catch(e){}
+  const p=ASIS_WIZ.plantilla||{};
+  ASIS_WIZ.nombre=p.nombre||'Idania';
+  ASIS_WIZ.promptMaestro=p.prompt_maestro||'';
+  ASIS_WIZ.mensajeBienvenida=p.mensaje_bienvenida||'';
+  ASIS_WIZ.mensajeReencuentro=p.mensaje_reencuentro||'';
   asisWizardRender();
 }
 
@@ -1946,11 +2119,11 @@ function asisWizardRender(){
     <div id="wiz-err"></div>
     <div class="modal-foot" style="margin-top:16px;display:flex;justify-content:space-between">
       ${ASIS_WIZ.step>1?`<button class="btn btn-ghost btn-sm" onclick="asisWizardBack()">← Atrás</button>`:'<span></span>'}
-      ${ASIS_WIZ.step<5?`<button class="btn btn-prim btn-sm" onclick="asisWizardNext()">Siguiente →</button>`:`<button class="btn btn-prim btn-sm" onclick="asisWizardSubmit()">Crear asistente</button>`}
+      ${ASIS_WIZ.step<5?`<button class="btn btn-prim btn-sm" onclick="asisWizardNext()">${ASIS_WIZ.step===4?'Saltar / Siguiente →':'Siguiente →'}</button>`:`<button class="btn btn-prim btn-sm" onclick="asisWizardSubmit()">Crear asistente</button>`}
     </div>`;
 
-  if(ASIS_WIZ.step===2)ASIS_STAGE_DEFS.forEach(s=>asisWizRenderStage(s));
-  if(ASIS_WIZ.step===3)asisWizInitStep3();
+  if(ASIS_WIZ.step===1&&ASIS_WIZ.tipo==='rd'&&ASIS_WIZ.rd_id)asisWizInitStep3();
+  if(ASIS_WIZ.step===4)ASIS_STAGE_DEFS.forEach(s=>asisWizRenderStage(s));
 }
 
 function asisWizError(msg){
@@ -1960,61 +2133,31 @@ function asisWizError(msg){
 
 function asisWizStep1HTML(){
   return `
-    <div class="fg"><label class="fl">Nombre del tutor <span class="req">*</span></label><input class="fc" id="wiz-nombre" value="${esc(ASIS_WIZ.nombre)}" placeholder="Ej: IdanIA"></div>
-    <div class="fg"><label class="fl">Token de acceso público (opcional)</label>
-      <input class="fc" id="wiz-token" value="${esc(ASIS_WIZ.token||'')}" placeholder="Dejar vacío para generar uno automático">
-      <div class="fh">Es la parte de la URL pública (/asistente/&lt;token&gt;) — si lo dejás vacío se genera uno al azar.</div>
-    </div>
     <div class="fg"><label class="fl">Tipo de asistente <span class="req">*</span></label>
       <div class="srcs">
-        <div class="src ${ASIS_WIZ.tipo==='rd'?'selected':''}" id="wiz-tipo-rd" onclick="asisWizSelectTipo('rd')">
-          <span class="src-icon">🏫</span><span class="src-name">Con RD</span><span class="src-desc">Hereda la configuración de una RD — responde para cualquier curso que la RD tenga registrado.</span>
-        </div>
         <div class="src ${ASIS_WIZ.tipo==='normal'?'selected':''}" id="wiz-tipo-normal" onclick="asisWizSelectTipo('normal')">
-          <span class="src-icon">📦</span><span class="src-name">Normal</span><span class="src-desc">Independiente, un solo curso — usa los valores por defecto del sistema.</span>
+          <span class="src-icon">📦</span><span class="src-name">Normal</span><span class="src-desc">Independiente, un solo curso — valores por defecto recomendados.</span>
+        </div>
+        <div class="src ${ASIS_WIZ.tipo==='rd'?'selected':''}" id="wiz-tipo-rd" onclick="asisWizSelectTipo('rd')">
+          <span class="src-icon">🏫</span><span class="src-name">Con RD</span><span class="src-desc">Hereda la configuración de una RD — responde para cualquiera de sus cursos.</span>
         </div>
       </div>
     </div>
-    <div id="wiz-tipo-body">${asisWizTipoBodyHTML()}</div>`;
+    <div id="wiz-tipo-body">${asisWizTipoBodyHTML()}</div>
+    <div id="wiz-curso-body">${asisWizCursoBodyHTML()}</div>
+    <div id="wiz-normal-status" class="fh"></div>`;
 }
 
-function asisWizTipoBodyHTML(){
-  if(ASIS_WIZ.tipo==='normal')return '<div class="fh">El curso (Course ID) se pide más adelante, en el paso "Curso".</div>';
-  return `<div class="fg"><label class="fl">RD (aula) <span class="req">*</span></label>
-    <select class="fc" id="wiz-rd">
-      <option value="">— Selecciona —</option>
-      ${ASIS_WIZ.rds.map(r=>`<option value="${r.id}" ${r.id===ASIS_WIZ.rd_id?'selected':''}>${esc(r.nombre)}</option>`).join('')}
-    </select>
-  </div>`;
-}
-
-function asisWizSelectTipo(tipo){
-  ASIS_WIZ.tipo=tipo;
-  $('wiz-tipo-rd').classList.toggle('selected',tipo==='rd');
-  $('wiz-tipo-normal').classList.toggle('selected',tipo==='normal');
-  $('wiz-tipo-body').innerHTML=asisWizTipoBodyHTML();
-}
-
-function asisWizStep2HTML(){
-  const rd=ASIS_WIZ.tipo==='rd'?ASIS_WIZ.rds.find(r=>r.id===ASIS_WIZ.rd_id):null;
-  return `<p class="muted" style="margin-bottom:10px">Deja "Usar valor por defecto del sistema" en cualquier etapa para que este asistente use siempre el valor vigente de esa etapa.</p>` +
-    asisCfgGroupsHTML('wiz',rd,'asisWizardReopen',ASIS_WIZ.tipo);
-}
-
-function asisWizStep3HTML(){
+function asisWizCursoBodyHTML(){
   if(ASIS_WIZ.tipo==='normal'){
-    return `<div class="fg">
-        <label class="fl" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
-          <input type="checkbox" id="wiz-normal-tiene-curso" ${ASIS_WIZ.normalTieneCurso?'checked':''} onchange="asisWizToggleNormalCurso(this.checked)">
-          Vincular a un curso de Moodle
-        </label>
-        <div class="fh">Sin marcar: asistente institucional sin curso detrás (p.ej. un FAQ general) — elegís vos el nombre de su colección, en vez de tomarlo de un Course ID.</div>
-      </div>
+    return `<div class="fg"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+        <input type="checkbox" id="wiz-normal-tiene-curso" ${ASIS_WIZ.normalTieneCurso?'checked':''} onchange="asisWizToggleNormalCurso(this.checked)">
+        Vincular a un curso de Moodle
+      </label>
+      <div class="fh">Sin marcar: asistente institucional sin curso detrás (p.ej. un FAQ general).</div></div>
       <div class="fg"><label class="fl">Métrica de distancia</label>${qDistanceFieldHTML('wiz-normal',null)}
-        <div class="fh">Solo aplica si la colección todavía no existe (se crea con esta métrica). Si ya existe, se usa la que tenga.</div>
-      </div>
-      <div id="wiz-normal-course-box">${asisWizNormalCourseBoxHTML()}</div>
-      <div id="wiz-normal-status" class="fh"></div>`;
+        <div class="fh">Solo aplica si la colección todavía no existe.</div></div>
+      <div id="wiz-normal-course-box">${asisWizNormalCourseBoxHTML()}</div>`;
   }
   return `<div id="wiz-courses-list"><p class="muted">Cargando…</p></div>
     <div class="card-ttl mt16">Agregar un curso (crea su colección hija automáticamente)</div>
@@ -2027,8 +2170,77 @@ function asisWizStep3HTML(){
     <div id="wiz-course-status" class="fh"></div>`;
 }
 
+function asisWizTipoBodyHTML(){
+  if(ASIS_WIZ.tipo==='normal')return '';
+  return `<div class="fg"><label class="fl">RD (aula) <span class="req">*</span></label>
+    <select class="fc" id="wiz-rd" onchange="asisWizSelectRd(this.value)">
+      <option value="">— Selecciona —</option>
+      ${ASIS_WIZ.rds.map(r=>`<option value="${r.id}" ${r.id===ASIS_WIZ.rd_id?'selected':''}>${esc(r.nombre)}</option>`).join('')}
+    </select>
+  </div>`;
+}
+
+function asisWizSelectRd(v){
+  ASIS_WIZ.rd_id=v?parseInt(v):null;
+  asisWizInitStep3();
+}
+
+function asisWizSelectTipo(tipo){
+  ASIS_WIZ.tipo=tipo;
+  const n=$('wiz-tipo-normal'),r=$('wiz-tipo-rd');
+  if(n)n.classList.toggle('selected',tipo==='normal');
+  if(r)r.classList.toggle('selected',tipo==='rd');
+  $('wiz-tipo-body').innerHTML=asisWizTipoBodyHTML();
+  $('wiz-curso-body').innerHTML=asisWizCursoBodyHTML();
+  if(tipo==='rd')asisWizInitStep3();
+}
+
+function asisWizStep2HTML(){
+  return `<div class="fg"><label class="fl">Nombre del tutor <span class="req">*</span></label><input class="fc" id="wiz-nombre" value="${esc(ASIS_WIZ.nombre)}" placeholder="Ej: Idania"></div>
+    <div class="fg"><label class="fl">Prompt maestro</label>
+      <textarea class="fc" id="wiz-prompt" rows="5" placeholder="Contexto adicional para el asistente…">${esc(ASIS_WIZ.promptMaestro)}</textarea>
+      <div class="fh">Se agrega al prompt del sistema fijo — no lo reemplaza.</div></div>
+    <div class="fg"><label class="fl">Mensaje de bienvenida</label>
+      <textarea class="fc" id="wiz-saludo" rows="3">${esc(ASIS_WIZ.mensajeBienvenida)}</textarea></div>
+    <div class="fg"><label class="fl">Mensaje de reencuentro</label>
+      <textarea class="fc" id="wiz-reencuentro" rows="3">${esc(ASIS_WIZ.mensajeReencuentro)}</textarea></div>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="asisWizRestaurarPlantilla()">Restaurar plantilla Idania</button>
+    <details style="margin-top:12px"><summary style="cursor:pointer;font-size:12.5px;color:var(--gray-500)">Opciones avanzadas (token público)</summary>
+      <div class="fg" style="margin-top:8px"><label class="fl">Token de acceso público</label>
+        <input class="fc" id="wiz-token" value="${esc(ASIS_WIZ.token||'')}" placeholder="Vacío = se genera automático">
+        <div class="fh">Parte de la URL /asistente/&lt;token&gt;.</div></div>
+    </details>`;
+}
+
+function asisWizRestaurarPlantilla(){
+  const p=ASIS_WIZ.plantilla||{};
+  const n=$('wiz-nombre');if(n)n.value=p.nombre||'Idania';
+  const pr=$('wiz-prompt');if(pr)pr.value=p.prompt_maestro||'';
+  const s=$('wiz-saludo');if(s)s.value=p.mensaje_bienvenida||'';
+  const r=$('wiz-reencuentro');if(r)r.value=p.mensaje_reencuentro||'';
+}
+
+function asisWizPreviewCourseId(){
+  if(ASIS_WIZ.tipo==='normal')return ASIS_WIZ.normalCourseId||0;
+  const rd=ASIS_WIZ.rds.find(r=>r.id===ASIS_WIZ.rd_id);
+  return rd?rd.moodle_courseid:0;
+}
+
+function asisWizStep3HTML(){
+  const cid=asisWizPreviewCourseId();
+  return `<div class="fh" style="margin-bottom:8px">${cid?`Vista previa del curso ${cid}.`:'Sin curso vinculado — las vistas previas no estarán disponibles.'}</div>`+
+    ['documentos','navegacion','notas'].map(id=>funcionalidadCardHTML({
+      id,
+      on:ASIS_WIZ[id==='documentos'?'funcDocumentos':id==='navegacion'?'funcNavegacion':'funcNotas'],
+      prefix:'wiz',courseid:cid,
+    })).join('')+
+    `<div class="fg"><label class="fl">Mensajes por conversación</label><input class="fc" type="number" id="wiz-max-act" value="${ASIS_WIZ.maxActividades}" min="1" max="50" style="max-width:140px"></div>
+     <div class="fg"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="wiz-vz" ${ASIS_WIZ.vectorizarAlCrear?'checked':''}> Vectorizar pendientes al crear</label>
+       <div class="fh">Solo aplica a asistentes "normal" con curso.</div></div>`;
+}
+
 async function asisWizInitStep3(){
-  if(ASIS_WIZ.tipo==='normal')return;
+  if(ASIS_WIZ.tipo==='normal'||!ASIS_WIZ.rd_id)return;
   const box=$('wiz-courses-list');
   if(!box)return;
   try{
@@ -2120,27 +2332,20 @@ async function asisWizSetNormalSinCurso(){
     let col=existing.find(c=>c.name===name);
     if(!col){
       status.innerHTML='<span class="muted">No existe todavía — creándola con los valores por defecto…</span>';
-      const [denseInfo,sparseInfo]=await Promise.all([
-        api('{{ URL_PREFIX }}/api/config/dense'), api('{{ URL_PREFIX }}/api/config/sparse'),
-      ]);
+      const defs=ASIS_WIZ.defaults||{};
+      const dense=defs.dense||'openai/text-embedding-3-small';
+      const sparse=defs.sparse||'bm25';
       const created=await api('{{ URL_PREFIX }}/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-        name, vector_schema:'hybrid', dense_strategy:denseInfo.current, sparse_strategy:sparseInfo.current,
+        name, vector_schema:'hybrid', dense_strategy:dense, sparse_strategy:sparse,
         distance:qDistanceFieldValue('wiz-normal',null), rd_id:null, moodle_courseid:null,
       })});
       col={name:created.collection_name};
-      // Colección recién creada: se sabe con qué embedding, así que se fija
-      // en el asistente (ver asistente_enviar_mensaje — una colección
-      // "normal" no persiste su propio embedding en ningún otro lado).
-      ASIS_WIZ.normalDenseStrategy=denseInfo.current;
-      ASIS_WIZ.normalSparseStrategy=sparseInfo.current;
-    }else{
-      // Colección ya existente: no hay forma de saber con qué embedding se
-      // creó (no se persiste en ningún lado para una colección "normal") —
-      // queda en null; si esa colección no la creó ESTE wizard, el admin
-      // deberá fijar dense/sparse_strategy a mano después, en "Editar".
-      ASIS_WIZ.normalDenseStrategy=null;
-      ASIS_WIZ.normalSparseStrategy=null;
     }
+    // Embedding por defecto para asistentes (NO el default global del
+    // sistema): mismo criterio que la creación desde el panel del docente.
+    const defs=ASIS_WIZ.defaults||{};
+    ASIS_WIZ.normalDenseStrategy=defs.dense||'openai/text-embedding-3-small';
+    ASIS_WIZ.normalSparseStrategy=defs.sparse||'bm25';
     ASIS_WIZ.normalCourseId=null;
     ASIS_WIZ.normalCourseName=null;
     ASIS_WIZ.normalCollection=col.name;
@@ -2165,17 +2370,23 @@ async function asisWizSetNormalCourse(){
     let col=existing.find(c=>c.rd_id==null&&c.moodle_courseid===parseInt(courseId));
     if(!col){
       status.innerHTML='<span class="muted">No existe colección para este curso todavía — creándola con los valores por defecto…</span>';
-      const denseInfo=await api('{{ URL_PREFIX }}/api/config/dense');
+      const defs=ASIS_WIZ.defaults||{};
+      const dense=defs.dense||'openai/text-embedding-3-small';
+      const sparse=defs.sparse||'bm25';
       const created=await api('{{ URL_PREFIX }}/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-        name:`Curso_${courseId}`, vector_schema:'hybrid', dense_strategy:denseInfo.current,
+        name:`Curso_${courseId}`, vector_schema:'hybrid', dense_strategy:dense, sparse_strategy:sparse,
         distance:qDistanceFieldValue('wiz-normal',null), rd_id:null, moodle_courseid:parseInt(courseId),
       })});
       col={name:created.collection_name};
     }
+    // Embedding por defecto para asistentes (mismo que crea el docente).
+    const defs=ASIS_WIZ.defaults||{};
+    ASIS_WIZ.normalDenseStrategy=defs.dense||'openai/text-embedding-3-small';
+    ASIS_WIZ.normalSparseStrategy=defs.sparse||'bm25';
     ASIS_WIZ.normalCourseId=parseInt(courseId);
     ASIS_WIZ.normalCourseName=d.fullname;
     ASIS_WIZ.normalCollection=col.name;
-    status.innerHTML=`<span style="color:var(--green-700)">✓ ${esc(d.fullname)} — colección: ${esc(col.name)}.</span>`;
+    status.innerHTML=`<span style="color:var(--green-700)">✓ ${esc(d.fullname)} — colección: ${esc(col.name)} · ${esc(ASIS_WIZ.normalDenseStrategy)} / ${esc(ASIS_WIZ.normalSparseStrategy)}.</span>`;
   }catch(e){
     status.innerHTML=`<span style="color:var(--red-700)">${esc(e.message)}</span>`;
   }finally{
@@ -2207,93 +2418,92 @@ function asisWizCfgSelect(stage,name){
 }
 
 function asisWizStep4HTML(){
-  return `<div class="fg"><label class="fl">Prompt maestro (contexto adicional para el asistente)</label>
-    <textarea class="fc" id="wiz-prompt" rows="5" placeholder="Ej: Eres el asistente del curso de Introducción a las Ciencias Jurídicas. Responde con tono formal y académico…">${esc(ASIS_WIZ.promptMaestro)}</textarea>
-    <div class="fh">Se agrega al prompt del sistema fijo (prioridad al material del curso) — no lo reemplaza.</div>
-  </div>
-  <div class="fg"><label class="fl">Mensaje de bienvenida <span class="muted">— opcional</span></label>
-    <textarea class="fc" id="wiz-saludo" rows="3" placeholder="Ej: soy IdanIA. Pregúntame lo que necesites sobre el curso.">${esc(ASIS_WIZ.mensajeBienvenida)}</textarea>
-    <div class="fh">Se muestra al abrir el chat, después de "Hola [nombre del alumno], ". Déjalo vacío para usar el mensaje por defecto ("soy ${esc(ASIS_WIZ.nombre)}. Pregúntame lo que necesites sobre el curso.").</div>
-  </div>
-  <div class="fg"><label class="fl">Mensaje de reencuentro <span class="muted">— opcional</span></label>
-    <textarea class="fc" id="wiz-reencuentro" rows="3" placeholder="Ej: ¡qué bueno verte de nuevo! Seguimos donde lo dejamos.">${esc(ASIS_WIZ.mensajeReencuentro)}</textarea>
-    <div class="fh">Se muestra (no se guarda en el historial) cuando el alumno reabre una conversación que ya tenía preguntas — después de "Hola [nombre], ".</div>
-  </div>
-  <div class="fg"><label class="fl">Máximo de preguntas por conversación</label>
-    <input class="fc" type="number" id="wiz-max-act" value="${ASIS_WIZ.maxActividades}" min="1" style="max-width:140px">
-    <div class="fh">Al llegar al tope, el alumno debe iniciar una conversación nueva para seguir preguntando.</div>
-  </div>`;
+  const rd=ASIS_WIZ.tipo==='rd'?ASIS_WIZ.rds.find(r=>r.id===ASIS_WIZ.rd_id):null;
+  return `<div class="alert a-info">Opcional. Con los valores por defecto ya alcanza para un asistente completo.</div>
+    <details style="margin-top:10px"><summary style="cursor:pointer;font-weight:600">Mostrar configuración avanzada (estrategias RAG)</summary>
+      <div style="margin-top:10px">
+        <p class="muted" style="margin-bottom:10px">Dejá "Usar valor por defecto del sistema" en cualquier etapa para usar siempre el valor vigente.</p>
+        ${asisCfgGroupsHTML('wiz',rd,'asisWizardReopen',ASIS_WIZ.tipo)}
+      </div>
+    </details>`;
 }
 
 function asisWizStep5HTML(){
   const rd=ASIS_WIZ.rds.find(r=>r.id===ASIS_WIZ.rd_id);
-  const cfgLines=`<div class="dl">${ASIS_STAGE_DEFS.map(s=>`<div class="di"><div class="di-info"><div class="di-name">${esc(s.label)}</div><div class="di-meta">${ASIS_WIZ.cfg[s.stage]?esc(ASIS_WIZ.cfg[s.stage]):'Valor por defecto del sistema'}</div></div></div>`).join('')}</div>`;
+  const cid=asisWizPreviewCourseId();
+  const funcs=[ASIS_WIZ.funcDocumentos?'📚 Documentos':'',ASIS_WIZ.funcNavegacion?'🧭 Navegabilidad':'',ASIS_WIZ.funcNotas?'📊 Notas':''].filter(Boolean).join(' · ')||'Ninguna';
   return `
-    <div class="card">
-      <div class="card-ttl">Resumen</div>
-      <p><b>Nombre del tutor:</b> ${esc(ASIS_WIZ.nombre)}</p>
-      <p class="mt8"><b>Tipo:</b> ${ASIS_WIZ.tipo==='normal'?'📦 Normal':'🏫 Con RD'}</p>
+    <div class="card"><div class="card-ttl">Curso</div>
       ${ASIS_WIZ.tipo==='rd'
-        ?`<p class="mt8"><b>RD:</b> ${esc(rd?rd.nombre:'')}</p>`
+        ?`<p><b>RD:</b> ${esc(rd?rd.nombre:'')}</p>`
         :ASIS_WIZ.normalTieneCurso
-          ?`<p class="mt8"><b>Curso:</b> ${esc(ASIS_WIZ.normalCourseName||'')} (id ${ASIS_WIZ.normalCourseId}) → ${esc(ASIS_WIZ.normalCollection||'')}</p>`
-          :`<p class="mt8"><b>Curso:</b> <span class="muted">ninguno (institucional)</span> → ${esc(ASIS_WIZ.normalCollection||'')}</p>`}
-      <p class="mt8"><b>Prompt maestro:</b> ${ASIS_WIZ.promptMaestro?esc(ASIS_WIZ.promptMaestro):'<span class="muted">Ninguno</span>'}</p>
-      <p class="mt8"><b>Mensaje de bienvenida:</b> ${ASIS_WIZ.mensajeBienvenida?esc(ASIS_WIZ.mensajeBienvenida):'<span class="muted">Por defecto</span>'}</p>
-      <p class="mt8"><b>Mensaje de reencuentro:</b> ${ASIS_WIZ.mensajeReencuentro?esc(ASIS_WIZ.mensajeReencuentro):'<span class="muted">Por defecto</span>'}</p>
-      <p class="mt8"><b>Máximo de preguntas por conversación:</b> ${ASIS_WIZ.maxActividades}</p>
+          ?`<p><b>Curso:</b> ${esc(ASIS_WIZ.normalCourseName||'')} (id ${ASIS_WIZ.normalCourseId}) → ${esc(ASIS_WIZ.normalCollection||'')}</p>`
+          :`<p><b>Curso:</b> <span class="muted">institucional</span> → ${esc(ASIS_WIZ.normalCollection||'')}</p>`}
     </div>
-    <div class="card"><div class="card-ttl">Configuración RAG</div>${cfgLines}
-      <p class="muted mt8">3. Indexación y Búsqueda Híbrida: ${ASIS_WIZ.tipo==='rd'?'hereda la colección madre de la RD':'la fija la colección del curso'} (no se elige aquí).</p>
+    <div class="card" style="margin-top:10px"><div class="card-ttl">Identidad</div>
+      <p><b>${esc(ASIS_WIZ.nombre)}</b></p>
+      <p class="fh">Prompt y saludos ${ASIS_WIZ.promptMaestro?'personalizados':'de la plantilla Idania'}.</p>
     </div>
-    <p class="muted">${ASIS_WIZ.tipo==='rd'
-      ?'Este asistente responderá para cualquier courseid que la RD tenga registrado — agrega o quita cursos cuando quieras desde "Gestión RD → Cursos".'
-      :'Este asistente responde solo para el curso elegido en el paso "Curso".'}</p>`;
+    <div class="card" style="margin-top:10px"><div class="card-ttl">Funcionalidades</div>
+      <p>${esc(funcs)}</p>
+      <p class="fh">Mensajes por conversación: ${ASIS_WIZ.maxActividades}${ASIS_WIZ.vectorizarAlCrear&&ASIS_WIZ.tipo==='normal'&&cid?' · vectorizar pendientes al crear':''}</p>
+    </div>
+    <div class="card" style="margin-top:10px"><div class="card-ttl">Avanzado</div>
+      <p class="fh">${Object.keys(ASIS_WIZ.cfg||{}).some(k=>ASIS_WIZ.cfg[k])?'Estrategias RAG personalizadas':'Recomendado: valores por defecto del sistema'}</p>
+    </div>
+    <p class="muted" style="margin-top:8px">${ASIS_WIZ.tipo==='rd'?'Responderá para cualquier curso registrado en la RD.':'Responde solo para el curso elegido.'}</p>`;
 }
 
-function asisWizCaptureStep4(){
+function asisWizCaptureStep2(){
+  const n=$('wiz-nombre');if(n)ASIS_WIZ.nombre=n.value.trim();
+  const t=$('wiz-token');if(t)ASIS_WIZ.token=t.value.trim()||null;
   const p=$('wiz-prompt');if(p)ASIS_WIZ.promptMaestro=p.value.trim();
   const s=$('wiz-saludo');if(s)ASIS_WIZ.mensajeBienvenida=s.value.trim();
   const r=$('wiz-reencuentro');if(r)ASIS_WIZ.mensajeReencuentro=r.value.trim();
+}
+function asisWizCaptureStep3(){
+  const fn=$('wiz-func-notas');if(fn)ASIS_WIZ.funcNotas=fn.checked;
+  const fd=$('wiz-func-documentos');if(fd)ASIS_WIZ.funcDocumentos=fd.checked;
+  const fv=$('wiz-func-navegacion');if(fv)ASIS_WIZ.funcNavegacion=fv.checked;
   const m=$('wiz-max-act');if(m)ASIS_WIZ.maxActividades=parseInt(m.value)||10;
+  const vz=$('wiz-vz');if(vz)ASIS_WIZ.vectorizarAlCrear=vz.checked;
 }
 
 async function asisWizardNext(){
   if(ASIS_WIZ.step===1){
-    const nombre=$('wiz-nombre').value.trim();
-    if(!nombre){asisWizError('Ingresa el nombre del tutor.');return;}
-    ASIS_WIZ.nombre=nombre;
-    ASIS_WIZ.token=$('wiz-token').value.trim()||null;
     if(ASIS_WIZ.tipo==='rd'){
-      const rdId=$('wiz-rd').value;
+      const rdId=$('wiz-rd')?$('wiz-rd').value:'';
       if(!rdId){asisWizError('Selecciona una RD.');return;}
       ASIS_WIZ.rd_id=parseInt(rdId);
     }else{
       ASIS_WIZ.rd_id=null;
+      if(!ASIS_WIZ.normalCollection){
+        asisWizError(ASIS_WIZ.normalTieneCurso?'Buscá y confirmá un Course ID antes de continuar.':'Usá o creá una colección antes de continuar.');
+        return;
+      }
     }
   }
-  if(ASIS_WIZ.step===3&&ASIS_WIZ.tipo==='normal'&&!ASIS_WIZ.normalCollection){
-    asisWizError('Buscá y confirmá un Course ID antes de continuar.');return;
+  if(ASIS_WIZ.step===2){
+    asisWizCaptureStep2();
+    if(!ASIS_WIZ.nombre){asisWizError('Ingresa el nombre del tutor.');return;}
   }
-  if(ASIS_WIZ.step===4)asisWizCaptureStep4();
+  if(ASIS_WIZ.step===3)asisWizCaptureStep3();
   ASIS_WIZ.step++;
   if(ASIS_WIZ.step>ASIS_WIZ.maxStep)ASIS_WIZ.maxStep=ASIS_WIZ.step;
   asisWizardRender();
 }
 
 function asisWizardBack(){
-  if(ASIS_WIZ.step===4)asisWizCaptureStep4();
+  if(ASIS_WIZ.step===2)asisWizCaptureStep2();
+  if(ASIS_WIZ.step===3)asisWizCaptureStep3();
   ASIS_WIZ.step--;
   asisWizardRender();
 }
 
 function asisWizardGoto(n){
   if(n>ASIS_WIZ.maxStep||n===ASIS_WIZ.step)return;
-  if(ASIS_WIZ.step===1){
-    const el=$('wiz-nombre');if(el)ASIS_WIZ.nombre=el.value.trim();
-    const elTok=$('wiz-token');if(elTok)ASIS_WIZ.token=elTok.value.trim()||null;
-  }
-  if(ASIS_WIZ.step===4)asisWizCaptureStep4();
+  if(ASIS_WIZ.step===2)asisWizCaptureStep2();
+  if(ASIS_WIZ.step===3)asisWizCaptureStep3();
   ASIS_WIZ.step=n;
   asisWizardRender();
 }
@@ -2301,27 +2511,52 @@ function asisWizardGoto(n){
 async function asisWizardSubmit(){
   const btnEl=document.querySelector('#wiz-body .modal-foot .btn-prim');
   if(btnEl){btnEl.disabled=true;btnEl.textContent='Creando…';}
+  const cid=ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalCourseId:null;
+  const dense=ASIS_WIZ.normalDenseStrategy||(ASIS_WIZ.defaults&&ASIS_WIZ.defaults.dense)||null;
+  const sparse=ASIS_WIZ.normalSparseStrategy||(ASIS_WIZ.defaults&&ASIS_WIZ.defaults.sparse)||null;
   try{
     const d=await api('{{ URL_PREFIX }}/api/asistentes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
       nombre:ASIS_WIZ.nombre,
       token:ASIS_WIZ.token||null,
       rd_id:ASIS_WIZ.tipo==='rd'?ASIS_WIZ.rd_id:null,
-      moodle_courseid:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalCourseId:null,
-      dense_strategy:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalDenseStrategy:null,
-      sparse_strategy:ASIS_WIZ.tipo==='normal'?ASIS_WIZ.normalSparseStrategy:null,
+      moodle_courseid:cid,
+      dense_strategy:ASIS_WIZ.tipo==='normal'?dense:null,
+      sparse_strategy:ASIS_WIZ.tipo==='normal'?sparse:null,
       prompt_maestro:ASIS_WIZ.promptMaestro||null,
       mensaje_bienvenida:ASIS_WIZ.mensajeBienvenida||null,
       mensaje_reencuentro:ASIS_WIZ.mensajeReencuentro||null,
       max_actividades_sesion:ASIS_WIZ.maxActividades||10,
+      func_notas:!!ASIS_WIZ.funcNotas,
+      func_documentos:!!ASIS_WIZ.funcDocumentos,
+      func_navegacion:!!ASIS_WIZ.funcNavegacion,
       etl_document_strategy:ASIS_WIZ.cfg.etl_document||null,
       etl_audio_strategy:ASIS_WIZ.cfg.etl_audio||null,
       contextual_strategy:ASIS_WIZ.cfg.contextual||null,
       rerank_strategy:ASIS_WIZ.cfg.rerank||null,
       generation_strategy:ASIS_WIZ.cfg.generation||null,
     })});
+
+    if(cid){
+      const excl=[...document.querySelectorAll('input.wiz-excl:checked')].map(x=>x.value);
+      if(excl.length){
+        try{await api(`{{ URL_PREFIX }}/api/docente/cursos/${cid}/asistente/documentos-excluidos`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({filenames:excl})});}catch(e){}
+      }
+      if(ASIS_WIZ.vectorizarAlCrear){
+        try{await api(`{{ URL_PREFIX }}/api/docente/cursos/${cid}/vectorizar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filenames:null})});}catch(e){}
+      }
+    }
     const nombre=ASIS_WIZ.nombre;
+    const prueba=`${location.origin}${d.public_url}?prueba=1&courseid=${cid||0}`;
     ASIS_WIZ=null;
-    showModal('Asistente creado',`<p><strong>${esc(nombre)}</strong> fue creado.</p><p class="mt8">URL pública:<br><a href="${esc(d.public_url)}" target="_blank">${esc(d.public_url)}</a></p>`);
+    showModalWide('Asistente creado',`
+      <p><strong>${esc(nombre)}</strong> fue creado.</p>
+      <p class="mt8">URL pública: <a href="${esc(d.public_url)}" target="_blank">${esc(d.public_url)}</a></p>
+      <p class="fh">Probalo ahora mismo (conversación de prueba, no cuenta en estadísticas):</p>
+      <iframe src="${prueba}" style="width:100%;height:420px;border:1px solid var(--neutral-300);border-radius:10px;margin-top:8px;background:#fff"></iframe>
+      <div class="modal-foot" style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+        <a class="btn btn-ghost btn-sm" href="${prueba}" target="_blank">Abrir prueba en pestaña nueva</a>
+        <button class="btn btn-prim btn-sm" onclick="closeModal();asisEditOpen(${d.id})">Ir al asistente</button>
+      </div>`);
     asisLoad();
   }catch(e){
     asisWizError(e.message);
@@ -2330,7 +2565,13 @@ async function asisWizardSubmit(){
 }
 
 // ── Edición (modal seccionado por pestañas, no un solo scroll) ──
-const ASIS_EDIT_TABS=[{id:'general',label:'General'},{id:'curso',label:'Curso y colección'},{id:'prompt',label:'Prompt y saludo'},{id:'cfg',label:'Configuración RAG'}];
+const ASIS_EDIT_TABS=[
+  {id:'general',label:'General'},
+  {id:'func',label:'Funcionalidades'},
+  {id:'conocimiento',label:'Conocimiento idanIA'},
+  {id:'chat',label:'Probar chat'},
+  {id:'cfg',label:'Avanzado (RAG)'},
+];
 let ASIS_EDIT=null;
 
 async function asisEditOpen(id){
@@ -2338,15 +2579,25 @@ async function asisEditOpen(id){
     const a=await api('{{ URL_PREFIX }}/api/asistentes/'+id);
     const rdOpts=await api('{{ URL_PREFIX }}/api/rds');
     ASIS_EDIT={
-      id, tab:'general', data:a, rds:rdOpts.rds||[],
+      id, tab:'general', data:{...a, tipo:a.rd_id?'rd':'normal'}, rds:rdOpts.rds||[],
+      rdCourses:[], coursePreview:a.rd_id?null:(a.moodle_courseid||null),
       cfg:{
         etl_document:a.etl_document_strategy, etl_audio:a.etl_audio_strategy, contextual:a.contextual_strategy,
         rerank:a.rerank_strategy, generation:a.generation_strategy,
       },
     };
+    if(a.rd_id)await asisEditLoadRdCourses();
+    if(!ASIS_EDIT.coursePreview&&ASIS_EDIT.rdCourses.length)ASIS_EDIT.coursePreview=ASIS_EDIT.rdCourses[0];
     showModalWide(`Editar asistente — ${esc(a.nombre)}`,'<div id="edit-body"></div>');
     asisEditRender();
   }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+
+async function asisEditLoadRdCourses(){
+  try{
+    const rd=await api('{{ URL_PREFIX }}/api/rds/'+ASIS_EDIT.data.rd_id);
+    ASIS_EDIT.rdCourses=(rd.colecciones||[]).map(c=>c.moodle_courseid).filter(x=>x!=null);
+  }catch(e){ASIS_EDIT.rdCourses=[];}
 }
 
 function asisEditReopen(){
@@ -2358,24 +2609,41 @@ function asisEditTabsHTML(){
   return `<div class="wiz-tabs">${ASIS_EDIT_TABS.map(t=>`<div class="wiz-tab ${ASIS_EDIT.tab===t.id?'active':''}" onclick="asisEditGoto('${t.id}')">${esc(t.label)}</div>`).join('')}</div>`;
 }
 
+function asisEditCoursePickerHTML(){
+  const a=ASIS_EDIT.data;
+  if(a.tipo==='normal'){
+    return a.moodle_courseid
+      ?`<p class="fh">Curso vinculado: <b>${a.moodle_courseid}</b></p>`
+      :'<p class="muted">Este asistente no tiene curso vinculado.</p>';
+  }
+  const opts=(ASIS_EDIT.rdCourses||[]).map(cid=>`<option value="${cid}" ${cid===ASIS_EDIT.coursePreview?'selected':''}>Curso ${cid}</option>`).join('');
+  return `<div class="fg"><label class="fl">Curso de la RD (para las vistas previas)</label>
+    <select class="fc" id="edit-course-preview" onchange="asisEditSetCourse(this.value)">${opts||'<option value="">Sin cursos registrados</option>'}</select></div>`;
+}
+function asisEditSetCourse(cid){ASIS_EDIT.coursePreview=cid?parseInt(cid):null;asisEditRender();}
+
 function asisEditCapture(){
   if(ASIS_EDIT.tab==='general'){
     const n=$('edit-nombre'); if(n)ASIS_EDIT.data.nombre=n.value.trim();
     if(ASIS_EDIT.data.tipo==='rd'){
       const r=$('edit-rd'); if(r)ASIS_EDIT.data.rd_id=r.value?parseInt(r.value):null;
-      ASIS_EDIT.data.moodle_courseid=null; // un asistente RD no usa courseid propio
+      ASIS_EDIT.data.moodle_courseid=null;
     }else{
       const c=$('edit-courseid'); if(c)ASIS_EDIT.data.moodle_courseid=c.value?parseInt(c.value):null;
       ASIS_EDIT.data.rd_id=null;
     }
     const act=$('edit-activo'); if(act)ASIS_EDIT.data.activo=act.value==='true';
     const tok=$('edit-token'); if(tok)ASIS_EDIT.data.token=tok.value.trim();
-  }
-  if(ASIS_EDIT.tab==='prompt'){
     const p=$('edit-prompt'); if(p)ASIS_EDIT.data.prompt_maestro=p.value.trim();
     const s=$('edit-saludo'); if(s)ASIS_EDIT.data.mensaje_bienvenida=s.value.trim();
     const re=$('edit-reencuentro'); if(re)ASIS_EDIT.data.mensaje_reencuentro=re.value.trim();
     const ma=$('edit-max-act'); if(ma)ASIS_EDIT.data.max_actividades_sesion=parseInt(ma.value)||10;
+  }
+  if(ASIS_EDIT.tab==='func'){
+    const fn=$('edit-func-notas'); if(fn)ASIS_EDIT.data.func_notas=fn.checked;
+    const fd=$('edit-func-documentos'); if(fd)ASIS_EDIT.data.func_documentos=fd.checked;
+    const fv=$('edit-func-navegacion'); if(fv)ASIS_EDIT.data.func_navegacion=fv.checked;
+    const ma=$('edit-max-act-func'); if(ma)ASIS_EDIT.data.max_actividades_sesion=parseInt(ma.value)||10;
   }
 }
 
@@ -2389,8 +2657,9 @@ function asisEditRender(){
   const body=$('edit-body');
   if(!body)return;
   const content=ASIS_EDIT.tab==='general'?asisEditGeneralHTML()
-    :ASIS_EDIT.tab==='curso'?asisEditCursoHTML()
-    :ASIS_EDIT.tab==='prompt'?asisEditPromptHTML()
+    :ASIS_EDIT.tab==='func'?asisEditFuncionalidadesHTML()
+    :ASIS_EDIT.tab==='conocimiento'?asisEditConocimientoHTML()
+    :ASIS_EDIT.tab==='chat'?asisEditChatHTML()
     :asisEditCfgHTML();
 
   body.innerHTML=`${asisEditTabsHTML()}<div class="wiz-content">${content}</div>
@@ -2398,6 +2667,7 @@ function asisEditRender(){
     <div class="modal-foot" style="margin-top:16px"><button class="btn btn-prim btn-sm" onclick="asisEditSubmit()">Guardar</button></div>`;
 
   if(ASIS_EDIT.tab==='cfg')ASIS_STAGE_DEFS.forEach(s=>asisEditRenderStage(s));
+  if(ASIS_EDIT.tab==='conocimiento')asisEditLoadDocs();
 }
 
 function asisEditGeneralHTML(){
@@ -2416,9 +2686,16 @@ function asisEditGeneralHTML(){
     </div>
     <div id="edit-tipo-body">${asisEditTipoBodyHTML()}</div>
     <div class="fg"><label class="fl">Estado</label><select class="fc" id="edit-activo"><option value="true" ${a.activo?'selected':''}>Activo</option><option value="false" ${!a.activo?'selected':''}>Inactivo</option></select></div>
-    <div class="fg"><label class="fl">Token de acceso público</label><input class="fc" id="edit-token" value="${esc(a.token)}">
-      <div class="fh">⚠️ Cambiarlo invalida el enlace público actual — cualquiera que lo tenga guardado dejará de poder usarlo.</div>
-    </div>
+    <div class="fg"><label class="fl">Prompt maestro</label><textarea class="fc" id="edit-prompt" rows="5">${esc(a.prompt_maestro||'')}</textarea>
+      <div class="fh">Se agrega al prompt del sistema fijo — no lo reemplaza.</div></div>
+    <div class="fg"><label class="fl">Mensaje de bienvenida</label><textarea class="fc" id="edit-saludo" rows="3">${esc(a.mensaje_bienvenida||'')}</textarea></div>
+    <div class="fg"><label class="fl">Mensaje de reencuentro</label><textarea class="fc" id="edit-reencuentro" rows="3">${esc(a.mensaje_reencuentro||'')}</textarea></div>
+    <div class="fg"><label class="fl">Máximo de preguntas por conversación</label>
+      <input class="fc" type="number" id="edit-max-act" value="${a.max_actividades_sesion||10}" min="1" max="50" style="max-width:140px"></div>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:12.5px;color:var(--gray-500)">Token de acceso público</summary>
+      <div class="fg" style="margin-top:8px"><input class="fc" id="edit-token" value="${esc(a.token)}">
+        <div class="fh">⚠️ Cambiarlo invalida el enlace público actual.</div></div>
+    </details>
     <p class="muted">URL pública: <a href="${esc(a.public_url)}" target="_blank">${esc(a.public_url)}</a></p>
     <p class="muted">Calificación de los alumnos: ${a.calificaciones_total
       ? `<button class="btn btn-ghost btn-sm" onclick="asisCalifOpen(${a.id})">${fmtCalificacion(a.calificacion_promedio,a.calificaciones_total)}</button>`
@@ -2451,16 +2728,35 @@ function asisEditSelectTipo(tipo){
   $('edit-tipo-body').innerHTML=asisEditTipoBodyHTML();
 }
 
-function asisEditCursoHTML(){
+function asisEditFuncionalidadesHTML(){
   const a=ASIS_EDIT.data;
-  if(a.tipo==='normal'){
-    return `<p class="muted">Este asistente usa directamente la colección "normal" ${a.moodle_courseid?`del curso ${a.moodle_courseid}`:'institucional (sin curso de Moodle)'}
-      (sin pasar por una RD). Las colecciones se gestionan desde "Gestión Qdrant".</p>
-      <button class="btn btn-out btn-sm" onclick='closeModal();qLoadCols();showMod("qdrant-cols")'>Abrir Gestión Qdrant → Colecciones →</button>`;
+  return `<div class="fh" style="margin-bottom:8px">${a.tipo==='rd'?'Valores globales del asistente de la RD; cada aula puede tener ajustes propios.':''}</div>`+
+    ['documentos','navegacion','notas'].map(id=>funcionalidadCardHTML({
+      id,on:a['func_'+id],prefix:'edit',courseid:ASIS_EDIT.coursePreview||0,
+    })).join('')+
+    `<div class="fg"><label class="fl">Mensajes por conversación</label>
+      <input class="fc" type="number" id="edit-max-act-func" value="${a.max_actividades_sesion||10}" min="1" max="50" style="max-width:140px"></div>`;
+}
+
+function asisEditConocimientoHTML(){
+  return `<div class="fh" style="margin-bottom:10px">Materiales del curso y exclusiones. "No considerar" se guarda con su propio botón.</div>`+
+    asisEditCoursePickerHTML()+
+    `<div id="edit-docs" style="margin-top:10px"><span class="muted">Cargando…</span></div>`;
+}
+
+function asisEditChatHTML(){
+  const a=ASIS_EDIT.data;
+  const cid=ASIS_EDIT.coursePreview;
+  let inner;
+  if(a.tipo==='normal'&&!a.moodle_courseid){inner='<p class="muted">Este asistente no tiene curso vinculado.</p>';}
+  else if(!cid){inner='<p class="muted">Elegí un curso de la RD para probar el chat.</p>';}
+  else{
+    const u=`${location.origin}${a.public_url}?prueba=1&courseid=${cid}`;
+    inner=`<p class="fh">Conversación de prueba: no cuenta en estadísticas y usa la misma configuración que verá el alumno.</p>
+      <iframe src="${u}" style="width:100%;height:520px;border:1px solid var(--neutral-300);border-radius:10px;background:#fff"></iframe>
+      <div class="btn-grp" style="margin-top:8px"><a class="btn btn-ghost btn-sm" href="${u}" target="_blank">Abrir en pestaña nueva</a></div>`;
   }
-  const rd=ASIS_EDIT.rds.find(r=>r.id===a.rd_id);
-  return `<p class="muted">Los cursos y colecciones de esta RD (agregar, crear colección, reasignar) se gestionan desde "Gestión RD".</p>
-    <button class="btn btn-out btn-sm" onclick='closeModal();showMod("rd");rdLoad();rdCourses(${a.rd_id})'>Abrir cursos de "${esc(rd?rd.nombre:'')}" →</button>`;
+  return asisEditCoursePickerHTML()+`<div style="margin-top:10px">${inner}</div>`;
 }
 
 const SALUDO_VARS=['nombre','semana','tema','curso'];
@@ -2481,27 +2777,6 @@ function asisSaludoUpdate(which){
   if(warn) warn.textContent = unk.length ? ('⚠️ Placeholder(s) desconocido(s): '+unk.map(u=>'{'+u+'}').join(', ')) : '';
   if(prev) prev.textContent = ta.value.trim() ? ('Vista previa: '+saludoPreview(ta.value)) : '';
 }
-function asisEditPromptHTML(){
-  const varsHint='Variables: <code>{nombre}</code> (alumno), <code>{semana}</code>, <code>{tema}</code>, <code>{curso}</code>. Si el texto no usa ninguna, se mantiene el saludo clásico ("Hola [alumno], " + texto + semana).';
-  return `<div class="fg"><label class="fl">Prompt maestro</label><textarea class="fc" id="edit-prompt" rows="5">${esc(ASIS_EDIT.data.prompt_maestro||'')}</textarea>
-    <div class="fh">Se agrega al prompt del sistema fijo — no lo reemplaza.</div></div>
-  <div class="fg"><label class="fl">Mensaje de bienvenida <span class="muted">— opcional (plantilla)</span></label>
-    <textarea class="fc" id="edit-saludo" rows="3" oninput="asisSaludoUpdate('saludo')" placeholder="Ej: ¡Hola, {nombre}! Soy IdanIA. Nos corresponde la Semana {semana}, donde abordamos {tema}.">${esc(ASIS_EDIT.data.mensaje_bienvenida||'')}</textarea>
-    <div class="fh">Se muestra al abrir el chat. ${varsHint} Déjalo vacío para el mensaje por defecto.</div>
-    <div class="fh" id="edit-saludo-warn" style="color:#b45309"></div>
-    <div class="fh" id="edit-saludo-prev" style="border-left:3px solid #ddd;padding-left:8px"></div>
-  </div>
-  <div class="fg"><label class="fl">Mensaje de reencuentro <span class="muted">— opcional (plantilla)</span></label>
-    <textarea class="fc" id="edit-reencuentro" rows="3" oninput="asisSaludoUpdate('reencuentro')" placeholder="Ej: ¡Hola, {nombre}! Me alegra encontrarte otra vez. Nos corresponde la Semana {semana}, donde abordamos {tema}.">${esc(ASIS_EDIT.data.mensaje_reencuentro||'')}</textarea>
-    <div class="fh">Se muestra (no se guarda) al reabrir una conversación con historial. ${varsHint}</div>
-    <div class="fh" id="edit-reencuentro-warn" style="color:#b45309"></div>
-    <div class="fh" id="edit-reencuentro-prev" style="border-left:3px solid #ddd;padding-left:8px"></div>
-  </div>
-  <div class="fg"><label class="fl">Máximo de preguntas por conversación</label>
-    <input class="fc" type="number" id="edit-max-act" value="${ASIS_EDIT.data.max_actividades_sesion||10}" min="1" style="max-width:140px">
-  </div>`;
-}
-
 function asisEditCfgHTML(){
   const rd=ASIS_EDIT.rds.find(r=>r.id===ASIS_EDIT.data.rd_id);
   return `<p class="muted" style="margin-bottom:10px">Deja "Usar valor por defecto del sistema" en cualquier etapa para que este asistente use siempre el valor vigente de esa etapa.</p>` +
@@ -2548,6 +2823,9 @@ async function asisEditSubmit(){
       mensaje_bienvenida:a.mensaje_bienvenida||null,
       mensaje_reencuentro:a.mensaje_reencuentro||null,
       max_actividades_sesion:a.max_actividades_sesion||10,
+      func_notas:a.func_notas!==false,
+      func_documentos:a.func_documentos!==false,
+      func_navegacion:a.func_navegacion!==false,
       etl_document_strategy:ASIS_EDIT.cfg.etl_document||null,
       etl_audio_strategy:ASIS_EDIT.cfg.etl_audio||null,
       contextual_strategy:ASIS_EDIT.cfg.contextual||null,
@@ -2582,6 +2860,19 @@ async function loadCols(){
     const cols=d.collections||[];
     const opts='<option value="">— Selecciona —</option>'+cols.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
     ['semi-col','auto-col','upd-col','srch-col'].forEach(id=>{const e=$(id);if(e)e.innerHTML=opts});
+  }catch(e){console.error(e)}
+  await aLoadModelOptions();
+}
+
+// El módulo "Automático" (vectorización vía Moodle) vectoriza siempre con
+// el embedding que se le indique aquí; si se deja en blanco, usa el valor
+// por defecto del sistema (mismo comportamiento que antes de este selector).
+async function aLoadModelOptions(){
+  const sel=$('auto-model');
+  if(!sel)return;
+  try{
+    const d=await api('{{ URL_PREFIX }}/api/config/dense');
+    sel.innerHTML='<option value="">Usar el valor por defecto del sistema</option>'+(d.options||[]).map(o=>`<option value="${esc(o.name)}">${esc(o.name)} (${esc(o.description||'')})</option>`).join('');
   }catch(e){console.error(e)}
 }
 
@@ -2642,7 +2933,8 @@ async function aPreview(){
   S.auto.curid=curid;S.auto.sel=[];S.auto.typeFilter=null;S.auto.fileSourceTypes={};
   const btn=$('btn-a-prev');btn.disabled=true;btn.textContent='Consultando...';
   try{
-    const d=await api(`{{ URL_PREFIX }}/api/auto/preview?curid=${curid}&collection_name=${encodeURIComponent(S.auto.col)}`);
+    const modelQS=S.auto.modelName?`&model_name=${encodeURIComponent(S.auto.modelName)}`:'';
+    const d=await api(`{{ URL_PREFIX }}/api/auto/preview?curid=${curid}&collection_name=${encodeURIComponent(S.auto.col)}${modelQS}`);
     S.auto.mods=d.modules||[];
     aRenderTree();
     aGo(3);
@@ -2739,51 +3031,51 @@ function computeRepeats(mods){
   return repeats;
 }
 
-function aRenderTree(){
-  const filter=S.auto.typeFilter;
-  const repeats=computeRepeats(S.auto.mods);
-  const totalNew=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>!f.is_duplicate).length,0);
-  const totalDup=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>f.is_duplicate).length,0);
-  $('auto-file-cnt').textContent=`${totalNew} archivo(s) pendiente(s) en ${S.auto.mods.length} módulo(s)`+(totalDup>0?` · ${totalDup} ya vectorizado(s)`:'');
-  const counts=typeCounts(S.auto.mods,'files');
-  $('auto-tfilter').innerHTML=typeFilterHTML(counts,filter,'aToggleType');
-
-  // Se aplanan los archivos de TODOS los módulos de Moodle y se agrupan
-  // con groupDocsBySemana() — la MISMA función y el mismo criterio real
-  // (número de semana/sesión, orden, "General" primero) que ya usa
-  // "Colecciones por semana" en Gestión Qdrant — en vez de un árbol en el
-  // orden de módulos que devuelva Moodle. mod.module_name es el mismo
-  // dato que termina guardado como section_name al vectorizar (ver
-  // definitions.py), así que ambas vistas quedan consistentes.
+// Árbol de materiales compartido por Automático y Conocimiento idanIA:
+// mismos grupos (groupDocsBySemana), mismo filtro de tipo, mismos repetidos.
+function materialesTreeHTML(mods,opts){
+  opts=opts||{};
+  const idPrefix=opts.idPrefix||'mt';
+  const repeats=computeRepeats(mods);
+  const typeFilter=opts.typeFilter||null;
+  const textFilter=(opts.textFilter||'').toLowerCase();
+  const estadoDe=opts.estadoDe||(f=>f.is_duplicate?'vectorizado':(f.file_type==='other'?'no_soportado':'pendiente'));
+  const includeFile=opts.includeFile||(()=>true);
+  const openGroup=opts.openGroup||(()=>true);
+  const statusBadge=opts.statusBadge||((f,estado,ft)=>{
+    if(estado==='vectorizado')return '<span class="tag t-dup" title="Ya está vectorizado en esta colección">🔒 Ya vectorizado</span>';
+    const unsupported=f.file_type==='other';
+    return `<span class="tag ${unsupported?'t-err':'t-new'}">${unsupported?'✕ No soportado':'✓ '+ft.label}</span>`;
+  });
+  const headerCounter=opts.headerCounter||(rows=>{
+    const pend=rows.filter(({f})=>!f.is_duplicate).length;
+    const done=rows.length-pend;
+    return `${pend} pendiente(s)${done>0?` · ${done} ya vectorizado(s)`:''}`;
+  });
+  const rowLeft=opts.rowLeft||(()=> '');
+  const labelFor=opts.labelFor||(()=> '');
+  const rowExtra=opts.rowExtra||(()=> '');
   const flat=[];
-  S.auto.mods.forEach((mod,mi)=>mod.files.forEach((f,fi)=>{
-    if(filter&&!filter.has(f.file_type))return;
+  mods.forEach((mod,mi)=>mod.files.forEach((f,fi)=>{
+    if(typeFilter&&!typeFilter.has(f.file_type))return;
+    if(textFilter&&!(f.filename||'').toLowerCase().includes(textFilter))return;
+    const estado=estadoDe(f);
+    if(!includeFile(f,estado))return;
     const occ=repeats[f.filename];
-    if(occ&&occ.length>1&&occ.every(o=>o.fileurl===occ[0].fileurl)&&occ[0].mi!==mi)return; // ya se muestra en su primera semana
-    flat.push({f,mi,fi,module_name:mod.module_name});
+    if(occ&&occ.length>1&&occ.every(o=>o.fileurl===occ[0].fileurl)&&occ[0].mi!==mi)return;
+    flat.push({f,mi,fi,module_name:mod.module_name,estado});
   }));
   const semGroups=groupDocsBySemana(flat,'module_name');
-
-  $('auto-tree').innerHTML=semGroups.map(({label,docs:rows},gi)=>{
-    const pendCount=rows.filter(({f})=>!f.is_duplicate).length;
-    const doneCount=rows.length-pendCount;
-    return`<div class="tree-mod">
-      <div class="tree-mhdr" onclick="aTog(${gi})">
+  const html=semGroups.map(({label,docs:rows},gi)=>{
+    const open=openGroup(label);
+    return `<div class="tree-mod">
+      <div class="tree-mhdr" onclick="toggleTree('${idPrefix}',${gi})">
         <span class="tree-mname">${esc(label)}</span>
-        <span class="tree-mcnt">${pendCount} pendiente(s)${doneCount>0?` · ${doneCount} ya vectorizado(s)`:''}</span><span id="aa${gi}">▾</span>
+        <span class="tree-mcnt">${headerCounter(rows)}</span><span id="${idPrefix}a${gi}">${open?'▾':'▸'}</span>
       </div>
-      <div id="ab${gi}">
-        ${rows.map(({f,mi,fi})=>{
-          // A diferencia de antes, los archivos YA vectorizados
-          // (is_duplicate) ya NO se ocultan — se muestran igual que los
-          // pendientes, pero con el checkbox bloqueado (marcado, sin
-          // poder desmarcarlo): así cada semana se ve completa (qué falta
-          // y qué ya está).
+      <div id="${idPrefix}b${gi}" style="${open?'':'display:none'}">
+        ${rows.map(({f,mi,fi,estado})=>{
           const ft=fileTypeMeta(f.file_type);
-          const unsupported=f.file_type==='other';
-          const done=!!f.is_duplicate;
-          const checked=done||S.auto.sel.includes(f.filename);
-          const locked=done||unsupported;
           const occ=repeats[f.filename];
           let repeatBadge='';
           if(occ&&occ.length>1){
@@ -2793,36 +3085,62 @@ function aRenderTree(){
               ?`<span class="tag t-new" title="Mismo archivo, también enlazado en estos módulos">🔁 también en: ${others.join(', ')}</span>`
               :`<span class="tag t-warn" title="Nombre igual pero es un archivo DISTINTO en Moodle — se procesan ambos por separado">⚠️ nombre repetido en: ${others.join(', ')} (archivo distinto)</span>`;
           }
-          const statusBadge=done
-            ?`<span class="tag t-dup" title="Ya está vectorizado en esta colección">🔒 Ya vectorizado</span>`
-            :`<span class="tag ${unsupported?'t-err':'t-new'}">${unsupported?'✕ No soportado':'✓ '+ft.label}</span>`;
-          const doneDate=(f.existing_date||'').slice(0,10);
           const uploadDate=f.moodle_upload_date||'';
-          return `
-          <div class="tree-row${done?' tree-row-done':''}">
-            <input type="checkbox" id="ac${mi}_${fi}" data-fn="${esc(f.filename)}" onchange="aTick(${mi},${fi})" ${locked?'disabled':''} ${checked?'checked':''} title="${done?'Ya vectorizado — no seleccionable':''}">
-            <label for="ac${mi}_${fi}"><span style="color:var(--red-700)">${ft.icon}</span>${esc(f.filename)}
-              ${statusBadge}
+          const doneDate=(f.existing_date||'').slice(0,10);
+          const isDone=estado==='vectorizado';
+          return `<div class="tree-row${isDone?' tree-row-done':''}">
+            ${rowLeft(f,mi,fi,estado)}
+            <label${labelFor(f,mi,fi)}><span style="color:var(--red-700)">${ft.icon}</span>${esc(f.filename)}
+              ${statusBadge(f,estado,ft)}
               ${uploadDate?`<span class="tag" style="background:var(--neutral-200);color:var(--gray-500)" title="Fecha en que el archivo se cargó/editó en Moodle">📤 ${uploadDate}</span>`:''}
-              ${done&&doneDate?`<span class="tag" style="background:var(--neutral-200);color:var(--gray-500)" title="Fecha en que se vectorizó">🗓 ${doneDate}</span>`:''}
+              ${isDone&&doneDate?`<span class="tag" style="background:var(--neutral-200);color:var(--gray-500)" title="Fecha en que se vectorizó">🗓 ${doneDate}</span>`:''}
               ${repeatBadge}
             </label>
-            ${done
-              ?`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aEditExistingSourceType(${JSON.stringify(f.filename)},this.value,this)' title="Recategorizar este documento ya vectorizado (curso propio / bibliografía) sin re-vectorizarlo">
-                <option value="curso_propio" ${f.existing_source_type==='curso_propio'?'selected':''}>🎓 Curso</option>
-                <option value="bibliografia" ${f.existing_source_type==='bibliografia'?'selected':''}>📚 Bibliografía</option>
-              </select>`
-              :`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aSetFileSourceType(${JSON.stringify(f.filename)},this.value)' title="Tipo de contenido para el tutor">
-                <option value="curso_propio" ${aFileSourceType(f.filename)==='curso_propio'?'selected':''}>🎓 Curso</option>
-                <option value="bibliografia" ${aFileSourceType(f.filename)==='bibliografia'?'selected':''}>📚 Bibliografía</option>
-              </select>`}
-            ${f.fileurl?`<a href="${esc(f.fileurl)}" target="_blank" rel="noopener" class="tag" style="text-decoration:none" onclick="event.stopPropagation()" title="Abrir el archivo original">👁 Ver</a>`:''}
-            <span class="tree-sz">${fmt(f.filesize)}</span>
+            ${rowExtra(f,mi,fi,estado)}
           </div>`;
         }).join('')}
-      </div>
-    </div>`;
+      </div></div>`;
   }).join('');
+  return {html,groups:semGroups.map(g=>g.label),rows:flat};
+}
+function toggleTree(prefix,gi){const b=$(prefix+'b'+gi),a=$(prefix+'a'+gi);const h=b.style.display==='none';b.style.display=h?'':'none';a.textContent=h?'▾':'▸';}
+
+function aRenderTree(){
+  const filter=S.auto.typeFilter;
+  const totalNew=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>!f.is_duplicate).length,0);
+  const totalDup=S.auto.mods.reduce((acc,m)=>acc+m.files.filter(f=>f.is_duplicate).length,0);
+  $('auto-file-cnt').textContent=`${totalNew} archivo(s) pendiente(s) en ${S.auto.mods.length} módulo(s)`+(totalDup>0?` · ${totalDup} ya vectorizado(s)`:'');
+  const counts=typeCounts(S.auto.mods,'files');
+  $('auto-tfilter').innerHTML=typeFilterHTML(counts,filter,'aToggleType');
+
+  const res=materialesTreeHTML(S.auto.mods,{
+    idPrefix:'a',
+    typeFilter:filter,
+    estadoDe:f=>f.is_duplicate?'vectorizado':(f.file_type==='other'?'no_soportado':'pendiente'),
+    rowLeft:(f,mi,fi,estado)=>{
+      const done=estado==='vectorizado';
+      const locked=done||f.file_type==='other';
+      const checked=done||S.auto.sel.includes(f.filename);
+      return `<input type="checkbox" id="ac${mi}_${fi}" data-fn="${esc(f.filename)}" onchange="aTick(${mi},${fi})" ${locked?'disabled':''} ${checked?'checked':''} title="${done?'Ya vectorizado — no seleccionable':''}">`;
+    },
+    labelFor:(f,mi,fi)=>` for="ac${mi}_${fi}"`,
+    rowExtra:(f,mi,fi,estado)=>{
+      const done=estado==='vectorizado';
+      const select=done
+        ?`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aEditExistingSourceType(${JSON.stringify(f.filename)},this.value,this)' title="Recategorizar este documento ya vectorizado (curso propio / bibliografía) sin re-vectorizarlo">
+            <option value="curso_propio" ${f.existing_source_type==='curso_propio'?'selected':''}>🎓 Curso</option>
+            <option value="bibliografia" ${f.existing_source_type==='bibliografia'?'selected':''}>📚 Bibliografía</option>
+          </select>`
+        :`<select class="fc" style="max-width:150px;padding:3px 6px;font-size:11px" onclick="event.stopPropagation()" onchange='aSetFileSourceType(${JSON.stringify(f.filename)},this.value)' title="Tipo de contenido para el tutor">
+            <option value="curso_propio" ${aFileSourceType(f.filename)==='curso_propio'?'selected':''}>🎓 Curso</option>
+            <option value="bibliografia" ${aFileSourceType(f.filename)==='bibliografia'?'selected':''}>📚 Bibliografía</option>
+          </select>`;
+      return select+
+        (f.fileurl?`<a href="${esc(f.fileurl)}" target="_blank" rel="noopener" class="tag" style="text-decoration:none" onclick="event.stopPropagation()" title="Abrir el archivo original">👁 Ver</a>`:'')+
+        `<span class="tree-sz">${fmt(f.filesize)}</span>`;
+    },
+  });
+  $('auto-tree').innerHTML=res.html;
   if(totalNew===0&&totalDup===0){
     $('auto-tree').innerHTML='<div class="alert a-info"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div><div class="a-ttl">Sin archivos</div>No se encontraron archivos en este curso.</div></div>';
   }else if($('auto-tree').innerHTML===''){
@@ -2838,7 +3156,7 @@ function aToggleType(t){
   }
   aRenderTree();
 }
-function aTog(mi){const b=$('ab'+mi),a=$('aa'+mi);const h=b.style.display==='none';b.style.display=h?'':'none';a.textContent=h?'▾':'▸';}
+function aTog(mi){toggleTree('a',mi);}
 function aTick(mi,pi){
   const cb=$('ac'+mi+'_'+pi),fn=cb.dataset.fn;
   if(cb.checked){if(!S.auto.sel.includes(fn))S.auto.sel.push(fn);}
@@ -2868,7 +3186,8 @@ async function aDownVal(){
   try{
     const fileSourceTypes={};
     S.auto.sel.forEach(fn=>{fileSourceTypes[fn]=aFileSourceType(fn)});
-    const d=await api('{{ URL_PREFIX }}/api/auto/download-validate',{method:'POST',headers:{'Content-Type':'application/json'},
+    const modelQS=S.auto.modelName?`?model_name=${encodeURIComponent(S.auto.modelName)}`:'';
+    const d=await api(`{{ URL_PREFIX }}/api/auto/download-validate${modelQS}`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({collection_name:S.auto.col,curid:S.auto.curid,selected_filenames:S.auto.sel,file_source_types:fileSourceTypes})});
     S.auto.jobId=d.job_id;
     $('auto-sg').innerHTML=(d.summaries||[]).map(scardHTML).join('');
@@ -3851,8 +4170,467 @@ async function qVerify(){
   }catch(e){box.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`}
 }
 
+// ═══ ROLES / SESIÓN ═══
+let ME=null;
+const DOC_CURSOS={};
+async function initRoles(){
+  try{ ME=await api('{{ URL_PREFIX }}/api/me'); }catch(e){ return; }
+  if(ME&&ME.rol==='docente')docenteUI();
+}
+function docenteUI(){
+  document.querySelectorAll('.nav').forEach(el=>{ if(el.id!=='nav-docente')el.style.display='none'; });
+  document.querySelectorAll('.sb-lbl,.sb-div').forEach(el=>{ el.style.display='none'; });
+  const nd=$('nav-docente'); if(nd)nd.style.display='flex';
+  showMod('docente'); docLoad();
+}
+
+// ═══ COMPONENTES COMPARTIDOS: funcionalidades y navegación ═══
+const MODNAME_LABELS={resource:'Documento',folder:'Carpeta',url:'Enlace/Video',assign:'Tarea',quiz:'Cuestionario',forum:'Foro',label:'Texto',page:'Página',book:'Libro',lesson:'Lección',workshop:'Taller'};
+const FUNC_META={
+  documentos:{label:'Documentos',icon:'📚',desc:'Responde con el material del curso',ejemplos:['¿Qué es…?','Explícame el tema de la semana 3']},
+  navegacion:{label:'Navegabilidad del aula',icon:'🧭',desc:'Semanas, actividades, fechas y dónde está cada recurso',ejemplos:['¿Qué tengo esta semana?','¿Dónde está la tarea 2?','¿Cuándo vence…?']},
+  notas:{label:'Notas',icon:'📊',desc:'Calificaciones y avance del propio alumno',ejemplos:['¿Cuál es mi nota?','¿Qué me falta entregar?']},
+};
+function funcionalidadCardHTML(opts){
+  const id=opts.id, meta=FUNC_META[id], prefix=opts.prefix||'f', courseid=opts.courseid||0;
+  return `<div class="card func-card" style="margin-bottom:10px">
+    <div class="fb"><label style="font-weight:700"><input type="checkbox" id="${prefix}-func-${id}" ${opts.on!==false?'checked':''} onchange="funcToggle('${prefix}','${id}',this.checked)"> ${meta.icon} ${meta.label}</label>
+      <button class="btn btn-ghost btn-sm" onclick="funcVer('${prefix}','${id}',${courseid})">Ver contenido</button></div>
+    <div class="fh">${meta.desc}</div>
+    <div class="fh" style="margin-top:4px">Ej.: ${meta.ejemplos.map(e=>`«${esc(e)}»`).join(' · ')}</div>
+    <div id="${prefix}-prev-${id}" class="hidden" style="margin-top:10px"></div>
+  </div>`;
+}
+function funcToggle(prefix,id,checked){const el=$(prefix+'-prev-'+id);if(el&&!checked)el.classList.add('hidden');}
+async function funcVer(prefix,id,courseid){
+  const el=$(prefix+'-prev-'+id); if(!el)return;
+  if(!el.classList.contains('hidden')){el.classList.add('hidden');return;}
+  el.classList.remove('hidden');
+  const chk=$(prefix+'-func-'+id);
+  if(chk&&!chk.checked){
+    el.innerHTML='<div class="alert a-warn">El asistente responderá: «Esta funcionalidad no está habilitada en este asistente.»</div>';
+    return;
+  }
+  if(!courseid){el.innerHTML='<div class="alert a-info">Sin curso vinculado.</div>';return;}
+  if(el.dataset.loaded)return;
+  el.innerHTML='<p class="muted">Cargando…</p>';
+  try{
+    if(prefix==='wiz'&&id==='documentos'){
+      const kn=await api(`{{ URL_PREFIX }}/api/docente/cursos/${courseid}/conocimiento`);
+      const tree=materialesTreeHTML(kn.modules||[],{
+        idPrefix:'wizkn',
+        openGroup:(label)=>{const m=label.match(_SEMANA_LABEL_RE);return !m||(kn.semana_actual!=null&&parseInt(m[1],10)===kn.semana_actual);},
+        statusBadge:(f,est)=>{const cls=est==='vectorizado'?'t-new':est==='pendiente'?'t-warn':est==='excluido'?'t-err':'';return `<span class="tag ${cls}">${esc(est)}</span>`;},
+        headerCounter:(rows)=>`${rows.length} materiales`,
+        rowExtra:(f,mi,fi,est)=>`<label class="fh"><input type="checkbox" class="wiz-excl" value="${esc(f.filename)}" ${est==='excluido'?'checked':''}> No considerar</label><span></span>`,
+      });
+      el.innerHTML=tree.html;
+      el.dataset.loaded='1';
+      return;
+    }
+    const d=await api(`{{ URL_PREFIX }}/api/docente/cursos/${courseid}/funcionalidad/${id}`);
+    el.innerHTML=id==='navegacion'?navegacionHTML(d):(id==='notas'?notasHTML(d):documentosFuncHTML(d));
+    el.dataset.loaded='1';
+  }catch(e){el.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`;}
+}
+function notasHTML(d){
+  const acts=d.actividades||[];
+  return `<p class="fh">${esc(d.nota||'')}</p>`+(acts.length?`<div class="tw"><table><thead><tr><th>Semana</th><th>Tipo</th><th>Actividad</th><th>Enlace</th></tr></thead><tbody>`+
+    acts.map(a=>`<tr><td>${esc(a.seccion||'')}</td><td>${esc(a.tipo_label||a.tipo)}</td><td>${esc(a.nombre)}</td><td>${a.url?`<a href="${esc(a.url)}" target="_blank">Abrir</a>`:'—'}</td></tr>`).join('')+
+    `</tbody></table></div>`:'<p class="muted">Sin actividades calificables.</p>');
+}
+function documentosFuncHTML(d){
+  const r=d.resumen||{};
+  return `<p class="fh">El asistente responde con <b>${r.vectorizados||0}</b> de <b>${r.total||0}</b> materiales (${r.excluidos||0} excluidos, ${r.pendientes||0} pendientes).</p>
+    <button class="btn btn-ghost btn-sm" onclick="docTab('conocimiento')">Ver Conocimiento idanIA →</button>`;
+}
+function navegacionHTML(data){
+  const sem=data.semana_actual;
+  const actual=(data.secciones||[]).find(s=>s.es_actual);
+  const entregas=(data.proximas_entregas||[]).map(e=>`<span class="kn-chip">📌 ${esc(e.nombre)} · vence ${esc(e.vence||'')}</span>`).join(' ');
+  let head=`<div class="card"><div style="font-weight:700">Semana actual: ${sem!=null?sem:'—'}${actual?` — ${esc(actual.nombre)}`:''}</div>`;
+  if(data.fechas_status==='unavailable')head+=`<div class="alert a-warn" style="margin-top:6px">${esc(data.fechas_message||'Las fechas no están disponibles en Moodle.')}</div>`;
+  else head+=`<div class="fh" style="margin-top:6px">${entregas?'Próximas entregas: '+entregas:'Sin entregas próximas registradas.'}</div>`;
+  head+='</div>';
+  const secs=(data.secciones||[]).map((s,idx)=>{
+    const abierta=(s.es_actual||(sem!=null&&s.numero===sem+1));
+    const grupos={};(s.actividades||[]).forEach(a=>{(grupos[a.tipo]=grupos[a.tipo]||[]).push(a)});
+    const tipos=Object.keys(grupos);
+    const cuenta=`${(s.actividades||[]).length} actividades`+(tipos.length?` · ${tipos.map(t=>`${grupos[t].length} ${(MODNAME_LABELS[t]||t).toLowerCase()}`).join(', ')}`:'');
+    const res=s.resumen_texto||'';
+    const corto=res.length>240?res.slice(0,240)+'…':res;
+    return `<div class="nav-sec ${s.es_actual?'nav-sec-current':''} ${s.visible===false?'nav-sec-hidden':''}">
+      <div class="nav-sec-hdr" onclick="navTog(${idx})">
+        <span class="nav-num">${s.numero}</span>
+        <span style="flex:1"><b>${esc(s.nombre)}</b> ${s.es_actual?'<span class="tag t-new">Semana actual</span>':''} ${s.visible===false?'<span class="tag t-warn">(oculta para alumnos)</span>':''}
+          <div class="fh">${cuenta}</div></span>
+        <span id="nava${idx}">${abierta?'▾':'▸'}</span>
+      </div>
+      <div id="navb${idx}" style="${abierta?'':'display:none'}">
+        ${res?`<div class="fh nav-resumen" data-full="${esc(res)}">${esc(corto)}${res.length>240?` <a href="#" onclick="navVerMas(event)">ver más</a>`:''}</div>`:''}
+        ${tipos.map(t=>`<div class="nav-tipo"><div class="fh">${MODNAME_ICON[t]||'📌'} ${esc(MODNAME_LABELS[t]||t)}</div>
+          ${grupos[t].map(a=>`<div class="nav-act ${a.visible===false?'nav-act-hidden':''}">${a.url?`<a href="${esc(a.url)}" target="_blank">${esc(a.nombre)}</a>`:esc(a.nombre)}
+            ${a.vence?`<span class="tag t-warn">Vence ${esc(a.vence)}</span>`:''}${a.visible===false?' <span class="fh">(oculta para alumnos)</span>':''}</div>`).join('')}
+        </div>`).join('')}
+        ${!(s.actividades||[]).length?'<div class="fh">Sin actividades registradas.</div>':''}
+      </div>
+    </div>`;
+  }).join('');
+  return head+`<div class="nav-timeline">${secs}</div>
+    <div class="card" style="margin-top:10px"><div class="fh">Así responde el asistente: «¿Qué tengo esta semana?» · «¿Dónde está la tarea 2?» · «¿Cuándo vence…?»</div></div>`;
+}
+function navTog(idx){toggleTree('nav',idx);}
+function navVerMas(e){e.preventDefault();const el=e.target.closest('.nav-resumen');if(el&&el.dataset.full)el.textContent=el.dataset.full;}
+
+// ═══ PANEL DEL DOCENTE (lista → detalle) ═══
+const DOC_STATE={curso:null,tab:'resumen',knowledge:null,dirty:{},filter:'todos',search:'',typeFilter:null};
+function _docPersist(){try{localStorage.setItem('doc_state',JSON.stringify({curso:DOC_STATE.curso,tab:DOC_STATE.tab}));}catch(e){}}
+function _docRestore(){try{const s=JSON.parse(localStorage.getItem('doc_state')||'null');if(s&&s.curso){DOC_STATE.curso=Number(s.curso);DOC_STATE.tab=s.tab||'resumen';}}catch(e){}}
+function _docClearState(){DOC_STATE.curso=null;DOC_STATE.tab='resumen';DOC_STATE.knowledge=null;DOC_STATE.dirty={};DOC_STATE.filter='todos';DOC_STATE.search='';try{localStorage.removeItem('doc_state');}catch(e){}}
+function _docUrl(c){const a=c&&c.asistente;return a?location.origin+a.url_publica:'';}
+
+async function docLoad(){
+  const box=$('doc-cursos'); if(!box)return;
+  DOC_STATE.dirty={};
+  box.innerHTML='<div class="card"><p class="muted">Cargando…</p></div>';
+  try{
+    const d=await api('{{ URL_PREFIX }}/api/docente/cursos');
+    const cs=d.cursos||[];
+    Object.keys(DOC_CURSOS).forEach(k=>delete DOC_CURSOS[k]);
+    cs.forEach(c=>{DOC_CURSOS[c.courseid]=c;});
+    if(!DOC_STATE.curso)_docRestore();
+    if(DOC_STATE.curso&&DOC_CURSOS[DOC_STATE.curso])docRenderDetail();
+    else{DOC_STATE.curso=null;docRenderList(cs);}
+  }catch(e){box.innerHTML=`<div class="card"><div class="alert a-err">${esc(e.message)}</div></div>`}
+}
+function docRenderList(cs){
+  const box=$('doc-cursos'); if(!box)return;
+  if(!cs.length){box.innerHTML='<div class="card"><p class="muted">No encontramos cursos tuyos en el periodo actual.</p></div>';return;}
+  box.innerHTML=`<div class="doc-grid">${cs.map(docCardHTML).join('')}</div>`;
+}
+function docCardHTML(c){
+  const a=c.asistente; const esRd=(c.tipo_curso==='rd');
+  const estado=a?(c.job_vectorizacion?'<span class="tag t-new">Vectorizando…</span>':(a.tipo==='rd'?'<span class="tag t-new">Listo</span> <span class="tag t-warn">RD</span>':'<span class="tag t-new">Listo</span>')):'<span class="tag">Sin asistente</span>';
+  const rol=a?(a.tipo==='rd'?'Asistente de la RD':'Asistente propio'):(esRd?'Curso de una RD':'');
+  return `<div class="card doc-card">
+    <div class="fb card-ttl"><span><strong>${esc(c.nombre_curso)}</strong></span>${estado}</div>
+    <div class="fh">${esc(c.shortname||'')}</div>
+    <div class="fh">Colección: <b>${esc(c.coleccion||'—')}</b> · ${c.puntos||0} vectores${rol?' · '+esc(rol):''}</div>
+    <div class="btn-grp" style="margin-top:10px">
+      ${a?`<button class="btn btn-prim btn-sm" onclick="docOpen(${c.courseid})">Configurar</button>`:''}
+      ${!a&&!esRd?`<button class="btn btn-prim btn-sm" onclick="docCreate(${c.courseid})">Crear asistente</button>`:''}
+      ${!a&&esRd?'<span class="muted">Gestionado por la administración (RD)</span>':''}
+    </div></div>`;
+}
+function docOpen(cid){DOC_STATE.curso=cid;DOC_STATE.tab='resumen';DOC_STATE.knowledge=null;DOC_STATE.dirty={};DOC_STATE.filter='todos';DOC_STATE.search='';_docPersist();docRenderDetail();}
+function docVolver(){
+  if(Object.keys(DOC_STATE.dirty).length&&!confirm('Hay cambios sin guardar. ¿Salir igual?'))return;
+  _docClearState(); docLoad();
+}
+function docTab(tab){
+  if(DOC_STATE.tab==='conocimiento'&&tab!=='conocimiento'&&Object.keys(DOC_STATE.dirty).length&&!confirm('Hay cambios sin guardar. ¿Descartarlos?'))return;
+  DOC_STATE.tab=tab; if(tab!=='conocimiento')DOC_STATE.dirty={}; _docPersist(); docRenderDetail();
+}
+function docRenderDetail(){
+  const box=$('doc-cursos'); const c=DOC_CURSOS[DOC_STATE.curso]; if(!box)return;
+  if(!c){docLoad();return;}
+  const a=c.asistente; const url=_docUrl(c);
+  const tabs=[['resumen','Resumen'],['conocimiento','Conocimiento idanIA'],['func','Funcionalidades'],['chat','Probar chat']];
+  const head=`<div class="doc-detail-hdr">
+    <button class="btn btn-ghost btn-sm" onclick="docVolver()">← Mis cursos</button>
+    <div style="flex:1;min-width:180px"><div style="font-weight:700">${esc(c.nombre_curso)}</div>
+      <div class="fh">${esc(c.shortname||'')} · ${a?(a.tipo==='rd'?'Asistente de la RD':'Asistente propio'):'Sin asistente'}</div></div>
+    ${url?`<button class="btn btn-ghost btn-sm" onclick="docCopy('${url}')">Copiar URL</button>`:''}
+  </div>
+  <div class="doc-tabs">${tabs.map(([id,l])=>`<div class="doc-tab ${DOC_STATE.tab===id?'active':''}" onclick="docTab('${id}')">${l}</div>`).join('')}</div>`;
+  let content='';
+  if(DOC_STATE.tab==='resumen')content=docResumenHTML(c);
+  else if(DOC_STATE.tab==='conocimiento')content='<div id="doc-kn"><p class="muted">Cargando…</p></div>';
+  else if(DOC_STATE.tab==='func')content=docFuncionesHTML(c);
+  else content=docChatHTML(c);
+  box.innerHTML=head+`<div style="margin-top:14px">${content}</div>`;
+  if(DOC_STATE.tab==='conocimiento')docLoadKnowledge();
+  if(DOC_STATE.tab==='resumen')docLoadPruebas(c);
+}
+function docResumenHTML(c){
+  const a=c.asistente;
+  const funcs=a?[a.func_notas?'Notas':'',a.func_documentos?'Documentos':'',a.func_navegacion?'Navegabilidad del aula':''].filter(Boolean).join(', '):'—';
+  return `<div class="card"><div class="card-ttl">Asistente</div>
+    <p><b>${esc(a?a.nombre:'Sin asistente')}</b> ${a?`<span class="tag t-new">${a.tipo==='rd'?'RD':'Normal'}</span>`:''}</p>
+    <p class="fh">Colección: ${esc(c.coleccion||'—')} · ${c.puntos||0} vectores</p>
+    <p class="fh">Funcionalidades activas: ${esc(funcs||'—')}</p>
+    ${a&&a.url_publica?`<p class="fh">URL: ${esc(location.origin+a.url_publica)}</p>`:''}</div>
+  <div class="card" style="margin-top:10px"><div class="card-ttl">Conversaciones de prueba</div><div id="doc-pruebas"><p class="muted">Cargando…</p></div></div>`;
+}
+async function docLoadPruebas(c){
+  const box=$('doc-pruebas'); if(!box)return;
+  try{
+    const d=await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/pruebas`);
+    const ps=d.pruebas||[];
+    box.innerHTML=ps.length?`<div class="tw"><table><thead><tr><th>Fecha</th><th>Probó</th><th>Preguntas</th><th>Primera pregunta</th></tr></thead><tbody>`+
+      ps.map(p=>`<tr><td>${esc((((p.last_activity_at||p.started_at)||'')+'').slice(0,16).replace('T',' '))}</td><td>${esc(p.probado_por_nombre||p.probado_por_username||'—')}</td><td>${p.preguntas||0}</td><td>${esc((p.primera_pregunta||'').slice(0,80))}</td></tr>`).join('')+
+      `</tbody></table></div>`:'<p class="muted">Todavía no hay conversaciones de prueba.</p>';
+  }catch(e){box.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`;}
+}
+async function docLoadKnowledge(){
+  const box=$('doc-kn'); const c=DOC_CURSOS[DOC_STATE.curso]; if(!box||!c)return;
+  box.innerHTML='<p class="muted">Cargando materiales de Moodle…</p>';
+  try{ DOC_STATE.knowledge=await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/conocimiento`); DOC_STATE.dirty={}; docRenderKnowledge(); }
+  catch(e){box.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`;}
+}
+function _docEstado(a){
+  const ex=(DOC_STATE.dirty[a.filename]!==undefined)?DOC_STATE.dirty[a.filename]:(a.estado==='excluido');
+  return ex?'excluido':a.estado;
+}
+function _docTypeCounts(modules){
+  const c={};
+  (modules||[]).forEach(m=>(m.files||[]).forEach(f=>{c[f.file_type]=(c[f.file_type]||0)+1}));
+  return c;
+}
+function docToggleType(t){
+  const tipos=new Set(Object.keys(_docTypeCounts(DOC_STATE.knowledge&&DOC_STATE.knowledge.modules)));
+  if(t==='__all__')DOC_STATE.typeFilter=null;
+  else{
+    if(!DOC_STATE.typeFilter)DOC_STATE.typeFilter=new Set(tipos);
+    if(DOC_STATE.typeFilter.has(t))DOC_STATE.typeFilter.delete(t);else DOC_STATE.typeFilter.add(t);
+    if(DOC_STATE.typeFilter.size===tipos.size)DOC_STATE.typeFilter=null;
+  }
+  docRenderKnowledge();
+}
+function docRenderKnowledge(){
+  const d=DOC_STATE.knowledge; const box=$('doc-kn'); if(!box||!d)return;
+  const r=d.resumen||{};
+  const chips=[['todos','Total',r.total],['pendiente','Pendientes',r.pendientes],['vectorizado','Vectorizados',r.vectorizados],['no_soportado','No soportados',r.no_soportados],['excluido','Excluidos',r.excluidos]];
+  const bar=`<div class="kn-bar">${chips.map(([id,l,n])=>`<span class="kn-chip ${DOC_STATE.filter===id?'active':''}" onclick="docFilter('${id}')">${l}: <b>${n||0}</b></span>`).join('')}</div>
+    ${typeFilterHTML(_docTypeCounts(d.modules),DOC_STATE.typeFilter,'docToggleType')}
+    <div class="fb" style="margin:10px 0;gap:8px;flex-wrap:wrap">
+      <input class="fc" style="max-width:240px" placeholder="Buscar archivo…" value="${esc(DOC_STATE.search)}" oninput="docSearch(this.value)">
+      <button class="btn btn-prim btn-sm" id="doc-vz-btn" onclick="docVectorizar(null)">Vectorizar pendientes (${r.pendientes||0})</button>
+    </div><div id="doc-vz-estado"></div>`;
+  const tree=materialesTreeHTML(d.modules||[],{
+    idPrefix:'kn',
+    typeFilter:DOC_STATE.typeFilter,
+    textFilter:DOC_STATE.search,
+    estadoDe:_docEstado,
+    includeFile:(f,est)=>DOC_STATE.filter==='todos'||est===DOC_STATE.filter,
+    openGroup:(label)=>{
+      const m=label.match(_SEMANA_LABEL_RE);
+      if(!m)return true;
+      return d.semana_actual!=null&&parseInt(m[1],10)===d.semana_actual;
+    },
+    statusBadge:(f,est)=>{
+      const cls=est==='vectorizado'?'t-new':est==='pendiente'?'t-warn':est==='excluido'?'t-err':'';
+      return `<span class="tag ${cls}">${esc(est)}</span>`;
+    },
+    headerCounter:(rows)=>{
+      const pend=rows.filter(x=>x.estado==='pendiente').length;
+      return `${rows.length} materiales · ${pend} pendientes`;
+    },
+    rowExtra:(f,mi,fi,est)=>{
+      const enc=encodeURIComponent(f.filename);
+      const vector=(f.estado==='pendiente'&&est!=='excluido')
+        ?`<button class="btn btn-ghost btn-sm" onclick="docVectorizarNombre('${enc}')">Vectorizar</button>`:'<span></span>';
+      return `<label class="fh" style="white-space:nowrap"><input type="checkbox" ${est==='excluido'?'checked':''} onchange="docSetExcluido('${enc}',this.checked)"> No considerar</label>${vector}`;
+    },
+  });
+  box.innerHTML=bar+tree.html+docDirtyBar();
+}
+function docFilter(id){DOC_STATE.filter=id;docRenderKnowledge();}
+function docSearch(v){DOC_STATE.search=v||'';docRenderKnowledge();const el=document.querySelector('#doc-kn input[placeholder="Buscar archivo…"]');if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}}
+function docSetExcluido(fnEnc,checked){const fn=decodeURIComponent(fnEnc);DOC_STATE.dirty[fn]=!!checked;docRenderKnowledge();}
+function docVectorizarNombre(fnEnc){docVectorizar([decodeURIComponent(fnEnc)]);}
+function docDirtyBar(){
+  const n=Object.keys(DOC_STATE.dirty).length;
+  if(!n)return '';
+  return `<div class="doc-savebar"><b>${n} cambio(s) sin guardar</b><span><button class="btn btn-prim btn-sm" onclick="docSaveDirty()">Guardar</button> <button class="btn btn-ghost btn-sm" onclick="docDiscardDirty()">Descartar</button></span></div>`;
+}
+function docDiscardDirty(){DOC_STATE.dirty={};docRenderKnowledge();}
+async function docSaveDirty(){
+  const d=DOC_STATE.knowledge; const c=DOC_CURSOS[DOC_STATE.curso]; if(!d||!c)return;
+  const names=[];
+  for(const m of (d.modules||[]))for(const f of (m.files||[])){
+    const ex=(DOC_STATE.dirty[f.filename]!==undefined)?DOC_STATE.dirty[f.filename]:(f.estado==='excluido');
+    if(ex)names.push(f.filename);
+  }
+  try{
+    await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/asistente/documentos-excluidos`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({filenames:names})});
+    DOC_STATE.dirty={}; await docLoadKnowledge();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+async function docVectorizar(filenames){
+  const c=DOC_CURSOS[DOC_STATE.curso]; if(!c)return;
+  try{
+    const d=await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/vectorizar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filenames})});
+    if(!d||!d.encolados){showModal('Nada que vectorizar','<p>No hay materiales pendientes.</p>');return;}
+    docPollVectorizacion();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+async function docPollVectorizacion(){
+  const c=DOC_CURSOS[DOC_STATE.curso]; if(!c)return;
+  const box=$('doc-vz-estado'); const btn=$('doc-vz-btn');
+  if(btn)btn.disabled=true;
+  if(box)box.innerHTML='<div class="fh">Vectorizando…</div>';
+  let tries=0;
+  const t=setInterval(async()=>{
+    tries++;
+    try{
+      const s=await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/vectorizar/estado`);
+      if(box)box.innerHTML=`<div class="fh">Estado: ${esc(s.estado)}</div>`;
+      if(['inactivo','completado','error'].includes(s.estado)||tries>1200){
+        clearInterval(t);
+        await docLoad();
+        if(DOC_STATE.tab==='conocimiento')await docLoadKnowledge();
+      }
+    }catch(e){clearInterval(t);if(btn)btn.disabled=false;}
+  },3000);
+}
+function docFuncionesHTML(c){
+  const a=c.asistente;
+  if(!a)return '<p class="muted">Este curso no tiene asistente.</p>';
+  return `<div class="fh" style="margin-bottom:8px">${a.tipo==='rd'?'Cambios solo para esta aula (no afectan la RD).':''}</div>`+
+    ['documentos','navegacion','notas'].map(id=>funcionalidadCardHTML({id,on:a['func_'+id],prefix:'df',courseid:c.courseid})).join('')+
+    `<div class="fg"><label class="fl">Mensajes por conversación</label><input class="fc" type="number" id="df-max" value="${a.max_actividades_sesion||10}" min="1" max="50" style="max-width:140px"></div>
+     <div class="fg"><label class="fl">Estado</label><select class="fc" id="df-act" style="max-width:160px"><option value="true" ${a.activo?'selected':''}>Activo</option><option value="false" ${!a.activo?'selected':''}>Inactivo</option></select></div>
+     <button class="btn btn-prim btn-sm" onclick="docSaveFunc()">Guardar funcionalidades</button>`;
+}
+async function docSaveFunc(){
+  const c=DOC_CURSOS[DOC_STATE.curso]; if(!c)return;
+  const body={func_notas:$('df-func-notas').checked,func_documentos:$('df-func-documentos').checked,
+    func_navegacion:$('df-func-navegacion').checked,max_actividades_sesion:parseInt($('df-max').value)||10,
+    activo:$('df-act').value==='true'};
+  try{await api(`{{ URL_PREFIX }}/api/docente/cursos/${c.courseid}/asistente`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});showModal('Guardado','<p>Funcionalidades actualizadas para esta aula.</p>');await docLoad();}
+  catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+function docChatHTML(c){
+  const a=c.asistente; if(!a)return '<p class="muted">Este curso no tiene asistente.</p>';
+  const u=`${location.origin}${a.url_publica}?prueba=1&courseid=${c.courseid}`;
+  return `<p class="fh">Conversación de prueba: no cuenta en estadísticas y usa la misma configuración que verá el alumno.</p>
+    <iframe src="${u}" style="width:100%;height:600px;border:1px solid var(--neutral-300);border-radius:12px;background:#fff"></iframe>
+    <div class="btn-grp" style="margin-top:8px"><a class="btn btn-ghost btn-sm" href="${u}" target="_blank">Abrir en pestaña nueva</a></div>`;
+}
+function docCreate(cid){
+  showModal('Crear asistente',`<p class="muted">Se crearán la colección (si falta) y el asistente con los valores por defecto de "Idania".</p>
+    <label style="display:block;margin:6px 0"><input type="checkbox" id="dc-notas" checked> Notas</label>
+    <label style="display:block;margin:6px 0"><input type="checkbox" id="dc-docs" checked> Documentos</label>
+    <label style="display:block;margin:6px 0"><input type="checkbox" id="dc-nav" checked> Navegabilidad del aula</label>
+    <div class="fg"><label class="fl">Cantidad de mensajes por conversación</label>
+      <input class="fc" type="number" id="dc-max" value="10" min="1" max="50" style="max-width:140px"></div>
+    <div class="modal-foot" style="margin-top:14px"><button class="btn btn-prim btn-sm" onclick="docCreateSubmit(${cid})">Crear asistente</button></div>`);
+}
+async function docCreateSubmit(cid){
+  const body={max_actividades_sesion:parseInt($('dc-max').value)||10,
+    func_notas:$('dc-notas').checked,func_documentos:$('dc-docs').checked,func_navegacion:$('dc-nav').checked};
+  try{
+    await api(`{{ URL_PREFIX }}/api/docente/cursos/${cid}/asistente`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    closeModal();
+    showModal('Asistente creado','<p>Asistente creado. La colección se vectoriza en segundo plano; refrescá "Mis cursos" para ver el avance.</p>');
+    docLoad();
+  }catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+function docCopy(t){
+  if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>showModal('Copiado','<p>URL copiada.</p>')).catch(()=>showModal('URL',`<p>${esc(t)}</p>`));}
+  else showModal('URL',`<p>${esc(t)}</p>`);
+}
+// ═══ EXCLUSIÓN DE DOCUMENTOS EN LA EDICIÓN (admin) ═══
+async function asisEditLoadDocs(){
+  const box=$('edit-docs'); if(!box)return;
+  const cid=ASIS_EDIT.coursePreview;
+  if(!cid){box.innerHTML='<p class="muted">Elegí un curso para ver sus materiales.</p>';return;}
+  box.innerHTML='<p class="muted">Cargando materiales…</p>';
+  try{
+    const d=await api(`{{ URL_PREFIX }}/api/docente/cursos/${cid}/conocimiento`);
+    const tree=materialesTreeHTML(d.modules||[],{
+      idPrefix:'ed',
+      openGroup:(label)=>{const m=label.match(_SEMANA_LABEL_RE);return !m||(d.semana_actual!=null&&parseInt(m[1],10)===d.semana_actual);},
+      statusBadge:(f,est)=>{const cls=est==='vectorizado'?'t-new':est==='pendiente'?'t-warn':est==='excluido'?'t-err':'';return `<span class="tag ${cls}">${esc(est)}</span>`;},
+      headerCounter:(rows)=>`${rows.length} materiales`,
+      rowExtra:(f,mi,fi,est)=>`<label class="fh"><input type="checkbox" class="editex" value="${esc(f.filename)}" ${est==='excluido'?'checked':''}> No considerar</label><span></span>`,
+    });
+    box.innerHTML=tree.html+'<button class="btn btn-prim btn-sm" style="margin-top:8px" onclick="asisEditSaveDocs()">Guardar exclusión</button>';
+  }catch(e){box.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`}
+}
+async function asisEditSaveDocs(){
+  const cid=ASIS_EDIT.coursePreview; if(!cid)return;
+  const names=[...document.querySelectorAll('#edit-docs input.editex:checked')].map(x=>x.value);
+  try{ await api(`{{ URL_PREFIX }}/api/docente/cursos/${cid}/asistente/documentos-excluidos`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({filenames:names})}); showModal('Guardado','<p>Exclusión actualizada para este curso.</p>'); }
+  catch(e){showModal('Error',`<p>${esc(e.message)}</p>`);}
+}
+
+// ═══ VISOR DE CONOCIMIENTO (admin) ═══
+let KN={courseid:null,col:null};
+function knLoad(){
+  const cid=parseInt($('kn-courseid').value)||0;
+  if(!cid){showModal('Falta Course ID','<p>Ingresa un Course ID.</p>');return;}
+  KN={courseid:cid,col:$('kn-col').value.trim()||null};
+  $('kn-card').style.display='block'; knTab('estructura');
+}
+async function knTab(tab){
+  const box=$('kn-body'); if(!box)return; box.innerHTML='<p class="muted">Cargando…</p>';
+  const qs=`courseid=${KN.courseid}&seccion=${tab}`+(KN.col?`&collection_name=${encodeURIComponent(KN.col)}`:'');
+  try{
+    if(tab==='estructura'){
+      // Misma vista de navegación que usa el docente/admin en Funcionalidades.
+      const nav=await api(`{{ URL_PREFIX }}/api/docente/cursos/${KN.courseid}/funcionalidad/navegacion`);
+      let extra='';
+      try{
+        const est=await api(`{{ URL_PREFIX }}/api/admin/cursos/${KN.courseid}/conocimiento?${qs}`);
+        if(est.cache)extra=`<p class="fh">Cache: ${esc(String(est.cache.fetched_at||'').slice(0,16))}${est.cache.invalidated_at?' (invalidado)':''} · TTL ${est.cache.ttl_minutes} min</p>`;
+      }catch(e){}
+      box.innerHTML=navegacionHTML(nav)+extra;
+      return;
+    }
+    const d=await api(`{{ URL_PREFIX }}/api/admin/cursos/${KN.courseid}/conocimiento?${qs}`);
+    box.innerHTML=knRender(tab,d);
+  }catch(e){ box.innerHTML=`<div class="alert a-err">${esc(e.message)}</div>`; }
+}
+function kvTable(obj){
+  const kv=Object.entries(obj||{});
+  if(!kv.length)return '<p class="muted">Sin datos.</p>';
+  return `<div class="tw"><table><thead><tr><th>Campo</th><th>Valor</th></tr></thead><tbody>`+
+    kv.map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('')+`</tbody></table></div>`;
+}
+function knRender(tab,d){
+  if(tab==='general'){
+    return `<p class="muted">Colección: <b>${esc(d.coleccion||'—')}</b></p><div class="card-ttl">Automático (Moodle)</div>${kvTable(d.campos_generales)}`+
+      `<div class="card-ttl" style="margin-top:14px">Indexado</div>${kvTable(Object.fromEntries((d.campos_generales_indexados||[]).map(x=>[x.field||x.field_normalized||JSON.stringify(x),x.value||x.value_raw||''])))}`;
+  }
+  if(tab==='fechas'){
+    if(d.status==='unavailable')return `<div class="alert a-warn">${esc(d.message||'Fechas no disponibles en Moodle.')}</div>`;
+    const ev=d.events||[];
+    return `<div class="tw"><table><thead><tr><th>Actividad</th><th>Vence</th></tr></thead><tbody>`+
+      ev.map(e=>`<tr><td>${esc(e.name)}</td><td>${esc(e.due_date||'')}</td></tr>`).join('')+`</tbody></table></div>`;
+  }
+  if(tab==='archivos'){
+    const rows=d.archivos||[];
+    return `<p class="muted">Colección: <b>${esc(d.coleccion||'—')}</b> · ${rows.length} archivo(s) registrados</p>
+      <div class="tw"><table><thead><tr><th>Archivo</th><th>Estado</th><th>Última indexación</th><th>Visto por última vez</th></tr></thead><tbody>`+
+      rows.map(r=>`<tr><td>${esc(r.filename)}</td><td>${esc(r.estado)}</td><td>${esc((r.last_indexed_at||'—').toString().slice(0,16))}</td><td>${esc((r.last_seen_at||'—').toString().slice(0,16))}</td></tr>`).join('')+`</tbody></table></div>`;
+  }
+  if(tab==='campos'){
+    const rows=d.rows||[];
+    return `<p class="muted">${d.total||0} campo(s) indexados${d.coleccion?` en ${esc(d.coleccion)}`:''} (mostrando ${rows.length})</p>
+      <div class="tw"><table><thead><tr><th>Documento</th><th>Campo</th><th>Valor</th><th>Sección</th><th>Pág.</th><th>Plantilla</th></tr></thead><tbody>`+
+      rows.map(r=>`<tr><td>${esc(r.document_filename)}</td><td>${esc(r.field_raw)}</td><td>${esc(r.value_raw)}</td><td>${esc(r.section_heading||'—')}</td><td>${r.page??'—'}</td><td>${r.is_repeated_template?'<span class="tag t-warn">Sí</span>':'No'}</td></tr>`).join('')+`</tbody></table></div>`;
+  }
+  if(tab==='autoridad'){
+    const rows=d.autoridad||[];
+    return `<div class="tw"><table><thead><tr><th>Fuente</th><th>Prioridad</th><th>Activo</th></tr></thead><tbody>`+
+      rows.map(r=>`<tr><td>${esc(r.source_type)}</td><td>${r.prioridad}</td><td>${r.activo?'Sí':'No'}</td></tr>`).join('')+`</tbody></table></div>`;
+  }
+  // estructura
+  let h=`<p class="muted">Colección: <b>${esc(d.coleccion||'—')}</b>${d.cache?` · cache: ${esc(String(d.cache.fetched_at||'').slice(0,16))}${d.cache.invalidated_at?' (invalidado)':''}`:''}</p>`;
+  if(d.semana_actual)h+=`<div class="alert a-info">Semana actual detectada: <b>${esc(JSON.stringify(d.semana_actual))}</b></div>`;
+  h+=(d.sections||[]).map(s=>`<div class="card" style="margin-bottom:10px">
+      <div class="card-ttl">${s.section_number}. ${esc(s.name)} ${s.visible?'':'<span class="tag t-warn">Oculta</span>'}</div>
+      ${s.summary?`<div class="fh" style="white-space:pre-wrap">${esc(s.summary)}</div>`:''}
+      <div class="tw"><table><thead><tr><th>Actividad</th><th>Tipo</th><th>Visible</th><th>¿Considerado?</th></tr></thead><tbody>`+
+      (s.activities||[]).map(a=>`<tr><td>${a.url?`<a href="${esc(a.url)}" target="_blank">${esc(a.name)}</a>`:esc(a.name)}</td><td>${esc(a.modname)}</td><td>${a.visible?'Sí':'No'}</td><td>${esc(a.considerado)}</td></tr>`).join('')+
+      `</tbody></table></div></div>`).join('');
+  return h||'<p class="muted">Sin estructura.</p>';
+}
+
 // ── Init ──
-window.addEventListener('DOMContentLoaded',loadCols);
+window.addEventListener('DOMContentLoaded',()=>{loadCols();initRoles();});
 </script>
 </body>
 </html>

@@ -11,6 +11,8 @@ FastAPI — un solo puerto (8100), tres asistentes:
 import asyncio
 import concurrent.futures
 import mimetypes
+import re
+import unicodedata
 import uuid
 import zlib
 from pathlib import Path
@@ -50,12 +52,14 @@ import rag_pipeline
 import credentials
 import db
 import auth
+import docentes
 import rds
 import ledger
 import assistants
 import course_map
 import campos_estructurados
 import query_router
+import moodle_calendar
 from strategies import registry as strategy_registry
 from strategies.runtime_config import get_runtime_config
 from qdrant_admin import CollectionCreateRequest, CollectionUpdateRequest, get_qdrant_admin
@@ -64,6 +68,23 @@ from qdrant_admin import CollectionCreateRequest, CollectionUpdateRequest, get_q
 # ═══════════════════════════════════════════════════════════════════
 # STARTUP
 # ═══════════════════════════════════════════════════════════════════
+
+async def _temp_janitor_loop() -> None:
+    """Barre archivos huérfanos de temp_docs/ (ver core.purge_stale_temp_files).
+    Corre una vez al arrancar y luego cada hora. Es una red de seguridad: el
+    cleanup normal borra cada archivo al terminar de vectorizarlo, pero un
+    job interrumpido (reinicio del proceso) o un archivo que falló la
+    validación antes de entrar al job quedaban en disco para siempre."""
+    from core import purge_stale_temp_files
+    while True:
+        try:
+            n = purge_stale_temp_files(max_age_hours=6.0)
+            if n:
+                print(f"🧹 Janitor temp_docs: {n} archivo(s) huérfano(s) eliminado(s)")
+        except Exception as e:
+            print(f"⚠️ Error en janitor de temp_docs: {e}")
+        await asyncio.sleep(3600)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -80,12 +101,14 @@ async def lifespan(app: FastAPI):
     )
     validate_settings()
     scheduler_task = None
+    janitor_task = None
     if db.check_connection():
         print("✅ Postgres conectado")
         auth.bootstrap_admin()
         credentials.load_all_into_settings()
         from migracion import migracion_scheduler_loop
         scheduler_task = asyncio.create_task(migracion_scheduler_loop())
+        janitor_task = asyncio.create_task(_temp_janitor_loop())
     else:
         print("⚠️ Postgres no disponible al arrancar — el login y las funciones de Asistentes/RD fallarán hasta que se restablezca la conexión.")
     # Pre-carga el modelo por defecto al arrancar
@@ -97,6 +120,12 @@ async def lifespan(app: FastAPI):
         scheduler_task.cancel()
         try:
             await scheduler_task
+        except asyncio.CancelledError:
+            pass
+    if janitor_task is not None:
+        janitor_task.cancel()
+        try:
+            await janitor_task
         except asyncio.CancelledError:
             pass
 
@@ -131,10 +160,28 @@ async def auth_gate(request: Request, call_next):
         path = path[len(root_path):] or "/"
     if path == "/" or path.startswith(_PUBLIC_PATH_PREFIXES):
         return await call_next(request)
-    if not request.session.get("user"):
+    user = request.session.get("user")
+    if not user:
         if path.startswith("/api/"):
             return JSONResponse({"detail": "No autenticado. Inicia sesión en /login."}, status_code=401)
         return RedirectResponse(f"{settings.resolved_url_prefix}/login")
+
+    # Un docente solo puede usar su propio panel y sus endpoints. Se usa una
+    # lista BLANCA (no negra) para que ningún endpoint de configuración quede
+    # abierto por olvido al agregar rutas nuevas.
+    rol = user.get("rol") or ("admin" if user.get("is_admin") else "docente")
+    if rol == "docente":
+        permitido = (
+            path == "/gestor"
+            or path == "/api/me"
+            or path.startswith("/api/docente/")
+            or path == "/logout"
+            or path.startswith("/img")
+        )
+        if not permitido:
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Requiere rol administrador."}, status_code=403)
+            return RedirectResponse(f"{settings.resolved_url_prefix}/gestor")
     return await call_next(request)
 
 
@@ -210,8 +257,62 @@ async def home(request: Request):
     return templates.TemplateResponse("interfaz.html", {"request": request, "user": request.session.get("user")})
 
 
+def _qparam(request: Request, name: str) -> str:
+    """query param aceptando también la forma 'amp;<name>' que deja un
+    '&amp;' literal sin decodificar (Moodle a veces escapa los '&')."""
+    qp = request.query_params
+    return (qp.get(name) or qp.get("amp;" + name) or "").strip()
+
+
 @app.get("/login", response_class=HTMLResponse, tags=["Interfaz"])
 async def login_page(request: Request):
+    # Enlace directo desde una actividad URL de Moodle:
+    # ?username=<documento>&userid=<userid Moodle>. Con los dos válidos
+    # entra sin ver el formulario; si falta alguno o no valida, se sirve
+    # el login normal (admin con usuario/contraseña).
+    #
+    # TEMPORAL (a pedido de Miguel, 2026-10-21): se retiró la verificación
+    # del secreto compartido DOCENTE_LOGIN_TOKEN para desbloquear el acceso
+    # mientras se rediseña este mecanismo (token cifrado de Moodle,
+    # mod_secureurl — ver doc/Características técnicas de integración.docx).
+    # La única verificación real que queda es que `userid` corresponda de
+    # verdad a `username` en Moodle (docentes.validar_docente). Restaurar
+    # o reemplazar este control antes de considerar el acceso cerrado.
+    username = _qparam(request, "username")
+    userid = _qparam(request, "userid")
+    if username and userid:
+        loop = asyncio.get_event_loop()
+        moodle_user = await loop.run_in_executor(None, docentes.validar_docente, username, userid)
+        if moodle_user:
+            try:
+                cursos = await loop.run_in_executor(None, docentes.cursos_de, username)
+            except Exception as e:
+                print(f"⚠️ No se pudieron resolver los cursos del docente {username}: {e}")
+                return templates.TemplateResponse(
+                    "login.html",
+                    {"request": request, "error": "No se pudieron consultar tus cursos. Intenta nuevamente más tarde."},
+                    status_code=503,
+                )
+            if not cursos:
+                return templates.TemplateResponse(
+                    "login.html",
+                    {"request": request, "error": "No encontramos cursos tuyos en el periodo actual."},
+                )
+            row = await db.run(
+                auth.upsert_docente, username, moodle_user.get("id"), moodle_user.get("fullname"),
+            )
+            request.session.clear()
+            request.session["user"] = {
+                "id": row["id"],
+                "username": username,
+                "is_admin": False,
+                "rol": "docente",
+                "documento": username,
+                "moodle_userid": row.get("moodle_userid") or moodle_user.get("id"),
+                "nombre": moodle_user.get("fullname") or username,
+                "courseids": [c["courseid"] for c in cursos],
+            }
+            return RedirectResponse(f"{settings.resolved_url_prefix}/gestor")
     if request.session.get("user"):
         return RedirectResponse(f"{settings.resolved_url_prefix}/gestor")
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
@@ -227,7 +328,15 @@ async def login_submit(request: Request, req: LoginRequest):
     user = await db.run(auth.authenticate, req.username, req.password)
     if not user:
         raise HTTPException(401, "Usuario o contraseña incorrectos.")
-    request.session["user"] = {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
+    request.session["user"] = {
+        "id": user["id"],
+        "username": user["username"],
+        "is_admin": bool(user.get("is_admin")),
+        "rol": user.get("rol") or ("admin" if user.get("is_admin") else "docente"),
+        "documento": user.get("documento"),
+        "moodle_userid": user.get("moodle_userid"),
+        "nombre": user.get("nombre") or user["username"],
+    }
     return {"success": True}
 
 
@@ -242,9 +351,13 @@ async def logout(request: Request):
 # ═══════════════════════════════════════════════════════════════════
 
 class CreateUserRequest(BaseModel):
-    username: str
-    password: str
+    username: str = ""
+    password: Optional[str] = None
     is_admin: bool = False
+    rol: Optional[str] = None            # 'admin' | 'docente'; default según is_admin
+    documento: Optional[str] = None      # obligatorio para docentes (login por Moodle)
+    moodle_userid: Optional[int] = None
+    nombre: Optional[str] = None
 
 
 @app.get("/api/usuarios", tags=["Usuarios"])
@@ -254,8 +367,25 @@ async def list_usuarios(user=Depends(auth.require_admin)):
 
 @app.post("/api/usuarios", status_code=201, tags=["Usuarios"])
 async def create_usuario(req: CreateUserRequest, user=Depends(auth.require_admin)):
+    rol = req.rol or ("admin" if req.is_admin else "docente")
+    if rol not in ("admin", "docente"):
+        raise HTTPException(400, "rol debe ser 'admin' o 'docente'")
+    username = (req.username or req.documento or "").strip()
+    if not username:
+        raise HTTPException(400, "Falta el usuario (o el documento, para docentes).")
+    if rol == "docente" and not (req.documento or "").strip():
+        raise HTTPException(400, "Un docente se crea con su documento (login por enlace de Moodle).")
     try:
-        return await db.run(auth.create_user, req.username, req.password, req.is_admin)
+        return await db.run(
+            auth.create_user,
+            username,
+            req.password,
+            rol == "admin",
+            rol,
+            (req.documento or "").strip() or None,
+            req.moodle_userid,
+            req.nombre,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -266,6 +396,762 @@ async def delete_usuario(user_id: int, user=Depends(auth.require_admin)):
         raise HTTPException(400, "No puedes eliminar tu propio usuario mientras tienes sesión activa.")
     await db.run(auth.delete_user, user_id)
     return {"success": True}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SESIÓN / ROLES / PANEL DEL DOCENTE
+# ═══════════════════════════════════════════════════════════════════
+
+_TPL_IDANIA_PATH = _APP_DIR / "plantillas" / "asistente_idania.json"
+# courseid -> job_id de la vectorización automática lanzada al crear el
+# asistente. En memoria (el job_store también lo es): si el proceso
+# reinicia, el job se pierde igual.
+_docente_jobs: Dict[int, str] = {}
+
+
+def _load_plantilla_idania() -> Dict[str, Any]:
+    """Plantilla compartida por el wizard de admin, la creación desde el
+    panel del docente y el spec e2e (plantillas/asistente_idania.json)."""
+    try:
+        import json as _json
+        with open(_TPL_IDANIA_PATH, encoding="utf-8") as f:
+            data = _json.load(f)
+        data.setdefault("nombre", "Idania")
+        return data
+    except Exception as e:
+        print(f"[WARN] No se pudo leer la plantilla de Idania ({_TPL_IDANIA_PATH}): {e}")
+        return {"nombre": "Idania"}
+
+
+def _is_admin(user: Dict[str, Any]) -> bool:
+    return bool(user.get("rol") == "admin" or user.get("is_admin"))
+
+
+@app.get("/api/me", tags=["Interfaz"])
+async def api_me(request: Request):
+    user = auth.get_current_user(request)
+    if _is_admin(user):
+        return {
+            "username": user.get("username"),
+            "nombre": user.get("nombre") or user.get("username"),
+            "rol": "admin",
+            "cursos": None,
+        }
+    documento = user.get("documento") or user.get("username")
+    try:
+        cursos = await db.run(docentes.cursos_de, documento)
+    except Exception as e:
+        print(f"[WARN] /api/me no pudo resolver cursos de {documento}: {e}")
+        cursos = []
+    return {
+        "username": user.get("username"),
+        "nombre": user.get("nombre"),
+        "rol": "docente",
+        "cursos": cursos,
+    }
+
+
+async def _create_normal_collection(
+    name: str,
+    courseid: int,
+    dense_strategy: str,
+    sparse_strategy: str,
+    distance: str = "Cosine",
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Crea una colección "normal" (sin RD) con el embedding indicado y la
+    registra en Postgres — mismo camino que POST /api/collections."""
+    try:
+        get_strategy_info("dense", dense_strategy)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    dense_size = get_model_dimensions(dense_strategy)
+    try:
+        result = get_qdrant_admin().create_collection(
+            name=name,
+            description=description,
+            vector_schema="hybrid",
+            dense_size=dense_size,
+            distance=distance,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    try:
+        await db.run(rds.link_collection, name, None, courseid, "hybrid")
+    except ValueError as e:
+        try:
+            get_qdrant_admin().delete_collection(name, force=True)
+        except Exception:
+            pass
+        raise HTTPException(400, str(e))
+    return result
+
+
+async def _vectorizar_curso_docente(
+    courseid: int,
+    collection_name: str,
+    model_name: str,
+    filenames: Optional[List[str]] = None,
+) -> None:
+    """Vectoriza en segundo plano los archivos indicados (o todo el curso
+    soportado y no duplicado si `filenames` es None). Deja el job_id en
+    `_docente_jobs` para que el panel muestre el progreso."""
+    try:
+        if filenames is None:
+            loop = asyncio.get_event_loop()
+            preview = await loop.run_in_executor(
+                None, AutoCore.preview_course, courseid, collection_name, model_name
+            )
+            filenames = [
+                f["filename"]
+                for m in preview.get("modules", [])
+                for f in m.get("files", [])
+                if not f.get("is_duplicate") and f.get("file_type") != "other"
+            ]
+        filenames = [f for f in (filenames or []) if f]
+        if not filenames:
+            print(f"[INFO] Curso {courseid}: nada nuevo para vectorizar.")
+            _docente_jobs.pop(courseid, None)
+            return
+        _docente_jobs[courseid] = "__starting__"
+        job_info = await AutoCore.download_and_validate(
+            courseid, collection_name, filenames, model_name, source_type="curso_propio"
+        )
+        _docente_jobs[courseid] = job_info["job_id"]
+        try:
+            await AutoCore.confirm_and_vectorize(job_info["job_id"])
+        finally:
+            # Al terminar (bien o mal) el panel vuelve a "Listo": el estado
+            # "Vectorizando…" solo debe durar mientras corre el job.
+            _docente_jobs.pop(courseid, None)
+        print(f"[OK] Vectorizacion automatica del curso {courseid} terminada.")
+    except Exception as e:
+        _docente_jobs.pop(courseid, None)
+        print(f"[ERROR] Vectorizacion automatica del curso {courseid} fallo: {e}")
+
+
+@app.get("/api/docente/cursos", tags=["Docente"])
+async def docente_listar_cursos(request: Request):
+    user = auth.require_docente_or_admin(request)
+    documento = user.get("documento") or (None if _is_admin(user) else user.get("username"))
+    if not documento:
+        return {"cursos": []}
+    try:
+        cursos = await db.run(docentes.cursos_de, documento)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudieron consultar tus cursos: {e}")
+    loop = asyncio.get_event_loop()
+    out = []
+    for c in cursos:
+        cid = c["courseid"]
+        coleccion = await db.run(rds.resolve_collection_para_curso, cid)
+        puntos = 0
+        if coleccion:
+            try:
+                info = await loop.run_in_executor(
+                    None, lambda col=coleccion: get_qdrant_admin().get_collection_info(col)
+                )
+                puntos = getattr(info, "points_count", 0) or 0
+            except Exception:
+                puntos = 0
+        # Asistente que sirve al curso: normal propio o el de su RD.
+        a = await db.run(assistants.get_asistente_para_curso, cid)
+        if a:
+            es_rd = bool(a.get("rd_id"))
+        else:
+            es_rd = bool(await db.run(
+                db.fetch_one,
+                "SELECT 1 FROM colecciones WHERE moodle_courseid = %s AND rd_id IS NOT NULL LIMIT 1",
+                (cid,),
+            ))
+        asistente = None
+        if a:
+            cfg = await db.run(assistants.get_curso_config, a["id"], cid)
+            tipo = "rd" if es_rd else "normal"
+            rd_nombre = None
+            if tipo == "rd":
+                rd = await db.run(rds.get_rd, a["rd_id"])
+                rd_nombre = (rd or {}).get("nombre")
+            asistente = {
+                "id": a["id"],
+                "nombre": a.get("nombre"),
+                "token": a.get("token"),
+                "url_publica": f"{settings.resolved_url_prefix}/asistente/{a.get('token')}",
+                "activo": (cfg["activo"] if cfg else True),
+                "global_activo": a.get("activo"),
+                "func_notas": (cfg["func_notas"] if cfg else a.get("func_notas", True)),
+                "func_documentos": (cfg["func_documentos"] if cfg else a.get("func_documentos", True)),
+                "func_navegacion": (cfg["func_navegacion"] if cfg else a.get("func_navegacion", True)),
+                "max_actividades_sesion": (
+                    cfg["max_actividades_sesion"] if cfg else a.get("max_actividades_sesion", 10)
+                ),
+                "tipo": tipo,
+                "rd_nombre": rd_nombre,
+            }
+        out.append({
+            **c,
+            "coleccion": coleccion,
+            "puntos": puntos,
+            "asistente": asistente,
+            "tipo_curso": "rd" if es_rd else "normal",
+            "job_vectorizacion": _docente_jobs.get(cid),
+        })
+    return {"cursos": out}
+
+
+@app.get("/api/docente/cursos/{courseid}/documentos", tags=["Docente"])
+async def docente_documentos(courseid: int, request: Request):
+    auth.require_docente_curso(request, courseid)
+    coleccion = await db.run(rds.resolve_collection_para_curso, courseid)
+    if not coleccion:
+        return {"collection_name": None, "documents": []}
+    try:
+        data = get_qdrant_admin().list_documents_in_collection(coleccion)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    excluidos = set()
+    if asistente:
+        excluidos = set(await db.run(assistants.get_excluded_filenames, asistente["id"], courseid))
+    docs = data.get("documents", [])
+    for d in docs:
+        d["excluido"] = d.get("filename") in excluidos
+    return {
+        "collection_name": coleccion,
+        "total_documents": data.get("total_documents", len(docs)),
+        "total_points": data.get("total_points", 0),
+        "documents": docs,
+    }
+
+
+@app.get("/api/docente/cursos/{courseid}/asistente", tags=["Docente"])
+async def docente_get_asistente(courseid: int, request: Request):
+    """Estado + configuración POR CURSO del asistente que sirve al curso
+    (normal o de su RD)."""
+    auth.require_docente_curso(request, courseid)
+    a = await db.run(assistants.get_asistente_para_curso, courseid)
+    if not a:
+        raise HTTPException(404, "El curso no tiene un asistente configurado.")
+    cfg = await db.run(assistants.get_curso_config, a["id"], courseid)
+    return {
+        "asistente": a,
+        "tipo": "rd" if a.get("rd_id") else "normal",
+        "config": cfg or {
+            "func_notas": a.get("func_notas", True),
+            "func_documentos": a.get("func_documentos", True),
+            "func_navegacion": a.get("func_navegacion", True),
+            "max_actividades_sesion": a.get("max_actividades_sesion", 10),
+            "activo": True,
+        },
+    }
+
+
+class ExcluidosRequest(BaseModel):
+    filenames: List[str] = []
+
+
+@app.put("/api/docente/cursos/{courseid}/asistente/documentos-excluidos", tags=["Docente"])
+async def docente_set_documentos_excluidos(
+    courseid: int, req: ExcluidosRequest, request: Request
+):
+    user = auth.require_docente_curso(request, courseid)
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    if not asistente:
+        raise HTTPException(404, "El curso no tiene un asistente configurado.")
+    coleccion = await db.run(rds.resolve_collection_para_curso, courseid)
+    if not coleccion:
+        raise HTTPException(404, "El curso no tiene una colección vectorizada.")
+    try:
+        data = get_qdrant_admin().list_documents_in_collection(coleccion)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    validos = {d.get("filename") for d in data.get("documents", [])}
+    invalidos = [f for f in req.filenames if f not in validos]
+    if invalidos:
+        raise HTTPException(
+            400,
+            f"Estos nombres no pertenecen a la colección: {', '.join(invalidos[:5])}",
+        )
+    saved = await db.run(
+        assistants.set_excluded_filenames,
+        asistente["id"], courseid, req.filenames, user.get("id"),
+    )
+    return {"excluidos": saved}
+
+
+class DocenteAsistentePatch(BaseModel):
+    max_actividades_sesion: Optional[int] = None
+    func_notas: Optional[bool] = None
+    func_documentos: Optional[bool] = None
+    func_navegacion: Optional[bool] = None
+    activo: Optional[bool] = None
+
+
+_PERMITIDOS_DOCENTE_PATCH = {
+    "max_actividades_sesion", "func_notas", "func_documentos", "func_navegacion", "activo",
+}
+
+
+@app.patch("/api/docente/cursos/{courseid}/asistente", tags=["Docente"])
+async def docente_patch_asistente(
+    courseid: int, req: DocenteAsistentePatch, request: Request
+):
+    """Override POR CURSO (no toca el asistente global ni la RD)."""
+    user = auth.require_docente_curso(request, courseid)
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    if not asistente:
+        raise HTTPException(404, "El curso no tiene un asistente configurado.")
+    fields = req.model_dump(exclude_unset=True)
+    extra = set(fields) - _PERMITIDOS_DOCENTE_PATCH
+    if extra:
+        raise HTTPException(400, f"Campos no permitidos: {', '.join(sorted(extra))}")
+    if "max_actividades_sesion" in fields:
+        v = fields["max_actividades_sesion"]
+        if v is None or not (1 <= int(v) <= 50):
+            raise HTTPException(400, "max_actividades_sesion debe estar entre 1 y 50.")
+    try:
+        return await db.run(
+            assistants.upsert_curso_config,
+            asistente["id"], courseid, **fields, updated_by=user.get("id"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class DocenteAsistenteCreate(BaseModel):
+    max_actividades_sesion: int = 10
+    func_notas: bool = True
+    func_documentos: bool = True
+    func_navegacion: bool = True
+
+
+@app.post("/api/docente/cursos/{courseid}/asistente", status_code=201, tags=["Docente"])
+async def docente_crear_asistente(
+    courseid: int, req: DocenteAsistenteCreate, request: Request
+):
+    user = auth.require_docente_curso(request, courseid)
+    if not (1 <= req.max_actividades_sesion <= 50):
+        raise HTTPException(400, "max_actividades_sesion debe estar entre 1 y 50.")
+    existing = await db.run(assistants.get_asistente_para_curso, courseid)
+    if existing:
+        raise HTTPException(
+            409,
+            f"El curso {courseid} ya tiene un asistente (id {existing['id']}). Edítalo en vez de crear otro.",
+        )
+    # Curso que pertenece a una RD: el asistente y su colección los gestiona
+    # la administración; no se crea un asistente "normal" paralelo.
+    rd_row = await db.run(
+        db.fetch_one,
+        "SELECT rd_id FROM colecciones WHERE moodle_courseid = %s AND rd_id IS NOT NULL LIMIT 1",
+        (courseid,),
+    )
+    if rd_row:
+        raise HTTPException(
+            409,
+            "Este curso pertenece a una RD; el asistente lo gestiona la administración.",
+        )
+
+    coleccion = await db.run(rds.resolve_collection_normal, courseid)
+    crear_coleccion = coleccion is None
+    if crear_coleccion:
+        coleccion = f"Curso_{courseid}"
+        await _create_normal_collection(
+            coleccion,
+            courseid,
+            settings.DOCENTE_DEFAULT_DENSE,
+            settings.DOCENTE_DEFAULT_SPARSE,
+            distance="Cosine",
+            description=f"Colección normal del curso {courseid} (asistente Idania).",
+        )
+
+    tpl = _load_plantilla_idania()
+    try:
+        asistente = await db.run(
+            assistants.create_asistente,
+            nombre=tpl.get("nombre") or "Idania",
+            rd_id=None,
+            moodle_courseid=courseid,
+            prompt_maestro=tpl.get("prompt_maestro"),
+            created_by=user.get("id"),
+            dense_strategy=settings.DOCENTE_DEFAULT_DENSE,
+            sparse_strategy=settings.DOCENTE_DEFAULT_SPARSE,
+            mensaje_bienvenida=tpl.get("mensaje_bienvenida"),
+            mensaje_reencuentro=tpl.get("mensaje_reencuentro"),
+            max_actividades_sesion=req.max_actividades_sesion,
+            func_notas=req.func_notas,
+            func_documentos=req.func_documentos,
+            func_navegacion=req.func_navegacion,
+        )
+    except ValueError as e:
+        if crear_coleccion:
+            try:
+                get_qdrant_admin().delete_collection(coleccion, force=True)
+            except Exception:
+                pass
+        raise HTTPException(400, str(e))
+
+    job_id = None
+    if crear_coleccion:
+        # Se lanza en segundo plano; `_docente_jobs[courseid]` se llena en
+        # cuanto download_and_validate crea el job (el panel lo muestra).
+        asyncio.create_task(
+            _vectorizar_curso_docente(courseid, coleccion, settings.DOCENTE_DEFAULT_DENSE)
+        )
+
+    return {
+        "asistente": asistente,
+        "url_publica": f"{settings.resolved_url_prefix}/asistente/{asistente.get('token')}",
+        "job_id": job_id,
+    }
+
+
+# ═══ CONOCIMIENTO idanIA (panel del docente) ═══════════════════════════════
+
+def _strip_moodle_token(url: Optional[str]) -> Optional[str]:
+    """Quita `token`/`wstoken` de un fileurl de Moodle antes de exponerlo."""
+    if not url:
+        return None
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        p = urlsplit(url)
+        q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() not in ("token", "wstoken")]
+        return urlunsplit((p.scheme, p.netloc, p.path, urlencode(q), p.fragment))
+    except Exception:
+        return None
+
+
+def _norm_order(text: Optional[str]) -> str:
+    """Clave de comparación: sin mayúsculas, tildes ni puntuación."""
+    text = unicodedata.normalize("NFKD", (text or "").lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _html_a_texto(html: Optional[str]) -> str:
+    """Resumen de sección de Moodle (HTML crudo) a texto plano legible."""
+    if not html:
+        return ""
+    import html as _htmlmod
+    # Los bloques se convierten en saltos de línea ANTES de extraer el texto;
+    # los elementos inline (<b>, <span>) quedan unidos con un espacio.
+    preparado = re.sub(
+        r"<\s*(br|/p|/li|/div|/h[1-6]|/tr)\s*/?>", "\n", html, flags=re.IGNORECASE
+    )
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(preparado, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = soup.get_text(" ")
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", preparado)
+    text = _htmlmod.unescape(text).replace("\xa0", " ")
+    lineas = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lineas.append(line)
+    return "\n".join(lineas)
+
+
+def _estado_archivo(f, ledger_row, excluidos):
+    """Prioridad: excluido > vectorizado > no_soportado > pendiente."""
+    fn = f["filename"]
+    if fn in excluidos:
+        return "excluido"
+    if f.get("is_duplicate"):
+        return "vectorizado"
+    if (ledger_row or {}).get("estado") == "no_soportado":
+        return "no_soportado"
+    return "pendiente"
+
+
+def _conocimiento_modules(preview, por_filename, excluidos):
+    """Devuelve `modules` en el MISMO orden que Moodle (igual que
+    /api/auto/preview), con `estado` por archivo y el `resumen`. Función
+    pura (sin DB) para poder probarla aislada."""
+    modules = []
+    resumen = {"total": 0, "vectorizados": 0, "pendientes": 0, "no_soportados": 0, "excluidos": 0}
+    mapa = {
+        "vectorizado": "vectorizados", "pendiente": "pendientes",
+        "no_soportado": "no_soportados", "excluido": "excluidos",
+    }
+    for m in preview.get("modules", []):
+        files = []
+        for f in m.get("files", []):
+            estado = _estado_archivo(f, por_filename.get(f["filename"]), excluidos)
+            files.append({
+                "filename": f["filename"],
+                "file_type": f.get("file_type"),
+                "filesize": f.get("filesize"),
+                "fileurl": _strip_moodle_token(f.get("fileurl")),
+                "is_duplicate": bool(f.get("is_duplicate")),
+                "existing_chunks": f.get("existing_chunks") or 0,
+                "existing_date": f.get("existing_date"),
+                "existing_source_type": f.get("existing_source_type"),
+                "moodle_upload_date": f.get("moodle_upload_date"),
+                "estado": estado,
+            })
+            resumen["total"] += 1
+            resumen[mapa[estado]] += 1
+        modules.append({
+            "module_name": m.get("module_name") or "General",
+            "resource_id": m.get("resource_id"),
+            "files": files,
+        })
+    return modules, resumen
+
+
+async def _conocimiento_payload(
+    courseid: int, coleccion: Optional[str], asistente_id: Optional[int]
+) -> Dict[str, Any]:
+    """Todos los materiales del curso (Moodle), cruzados con el estado de
+    vectorización y las exclusiones del curso, ordenados por semana y nombre."""
+    loop = asyncio.get_event_loop()
+    try:
+        preview = await loop.run_in_executor(
+            None, AutoCore.preview_course, courseid, coleccion, settings.DOCENTE_DEFAULT_DENSE
+        )
+    except Exception as e:
+        raise HTTPException(502, f"No se pudo consultar Moodle: {e}")
+
+    ledger_rows = await db.run(ledger.list_curso_archivos, coleccion) if coleccion else []
+    por_filename = {r["filename"]: r for r in ledger_rows}
+    excluidos = set()
+    if asistente_id:
+        excluidos = set(await db.run(assistants.get_excluded_filenames, asistente_id, courseid))
+
+    modules, resumen = _conocimiento_modules(preview, por_filename, excluidos)
+
+    semana_actual = None
+    if coleccion:
+        try:
+            sw = await loop.run_in_executor(
+                None, lambda: query_router.get_current_week_summary(coleccion, courseid)
+            )
+            if isinstance(sw, dict):
+                semana_actual = sw.get("week_number")
+        except Exception:
+            semana_actual = None
+
+    job = None
+    jid = _docente_jobs.get(courseid)
+    if jid == "__starting__":
+        job = {"job_id": None, "estado": "iniciando", "progreso": 0}
+    elif jid:
+        j = get_job(jid) or {}
+        job = {
+            "job_id": jid,
+            "estado": j.get("status") or "desconocido",
+            "progreso": 1 if j.get("status") == "completado" else 0,
+        }
+
+    return {
+        "collection_name": coleccion,
+        "semana_actual": semana_actual,
+        "resumen": resumen,
+        "modules": modules,
+        "job_vectorizacion": job,
+    }
+
+
+@app.get("/api/docente/cursos/{courseid}/conocimiento", tags=["Docente"])
+async def docente_conocimiento(courseid: int, request: Request):
+    auth.require_docente_curso(request, courseid)
+    coleccion = await db.run(rds.resolve_collection_para_curso, courseid)
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    data = await _conocimiento_payload(courseid, coleccion, asistente["id"] if asistente else None)
+    return data
+
+
+@app.get("/api/docente/cursos/{courseid}/pruebas", tags=["Docente"])
+async def docente_pruebas(courseid: int, request: Request):
+    """Últimas conversaciones de prueba de ese curso (pestaña Resumen)."""
+    auth.require_docente_curso(request, courseid)
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    if not asistente:
+        return {"pruebas": []}
+    return {
+        "pruebas": await db.run(
+            assistants.list_pruebas_por_curso, asistente["id"], courseid, 5
+        )
+    }
+
+
+_FUNC_TIPOS_CALIFICABLES = {"assign", "quiz", "workshop", "lesson", "forum"}
+
+
+def _navegacion_payload(est: Dict[str, Any], fechas: Dict[str, Any]) -> Dict[str, Any]:
+    """Estructura la navegación del curso (semanas/actividades/fechas) para
+    el panel docente y el admin. Función pura: no consulta Moodle."""
+    fechas_status = (fechas or {}).get("status")
+    fechas_message = (fechas or {}).get("message")
+
+    vence_por_nombre: Dict[str, str] = {}
+    proximas_entregas: List[Dict[str, Any]] = []
+    if fechas_status != "unavailable":
+        import time as _time
+        ahora = _time.time()
+        eventos = (fechas or {}).get("events") or []
+        for e in eventos:
+            key = _norm_order(e.get("name"))
+            if key:
+                vence_por_nombre.setdefault(key, e.get("due_date"))
+        futuros = [e for e in eventos if (e.get("due_epoch") or 0) >= ahora]
+        futuros.sort(key=lambda e: e.get("due_epoch") or 0)
+        proximas_entregas = [
+            {"nombre": e.get("name"), "vence": e.get("due_date"), "due_epoch": e.get("due_epoch")}
+            for e in futuros[:3]
+        ]
+
+    semana_actual = est.get("semana_actual")
+    secciones = []
+    tipos_count: Dict[str, int] = {}
+    for s in est.get("sections", []):
+        acts = []
+        for a in s.get("activities", []):
+            tipo = a.get("modname")
+            acts.append({
+                "tipo": tipo,
+                "tipo_label": query_router.MODNAME_LABELS.get(tipo, tipo),
+                "nombre": a.get("name"),
+                "url": a.get("url"),
+                "visible": a.get("visible"),
+                "vence": (
+                    vence_por_nombre.get(_norm_order(a.get("name")))
+                    if fechas_status != "unavailable" else None
+                ),
+            })
+            tipos_count[tipo] = tipos_count.get(tipo, 0) + 1
+        secciones.append({
+            "numero": s.get("section_number"),
+            "nombre": s.get("name"),
+            "visible": s.get("visible", True),
+            "es_actual": (s.get("section_number") == semana_actual),
+            "resumen_texto": _html_a_texto(s.get("summary")),
+            "resumen_html": s.get("summary") or "",
+            "actividades": acts,
+        })
+
+    return {
+        "funcionalidad": "navegacion",
+        "semana_actual": semana_actual,
+        "secciones": secciones,
+        "proximas_entregas": proximas_entregas,
+        "fechas_status": fechas_status,
+        "fechas_message": fechas_message,
+        "tipos": tipos_count,
+    }
+
+
+@app.get("/api/docente/cursos/{courseid}/funcionalidad/{nombre}", tags=["Docente"])
+async def docente_funcionalidad(courseid: int, nombre: str, request: Request):
+    """Contenido real que el asistente usará con cada funcionalidad."""
+    auth.require_docente_curso(request, courseid)
+    coleccion = await db.run(rds.resolve_collection_para_curso, courseid)
+
+    if nombre == "navegacion":
+        est = await _kn_estructura(courseid, coleccion)
+        fechas = await _kn_fechas(courseid)
+        return _navegacion_payload(est, fechas)
+
+    if nombre == "notas":
+        est = await _kn_estructura(courseid, coleccion)
+        actividades = [
+            {
+                "semana": s["section_number"], "seccion": s["name"],
+                "tipo": a["modname"], "nombre": a["name"], "url": a["url"],
+            }
+            for s in est["sections"]
+            for a in s["activities"]
+            if a["modname"] in _FUNC_TIPOS_CALIFICABLES
+        ]
+        return {
+            "funcionalidad": "notas",
+            "actividades": actividades,
+            "nota": "Cada alumno ve solo sus propias notas; el asistente las consulta en vivo en Moodle.",
+        }
+
+    if nombre == "documentos":
+        asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+        data = await _conocimiento_payload(
+            courseid, coleccion, asistente["id"] if asistente else None
+        )
+        return {
+            "funcionalidad": "documentos",
+            "resumen": data["resumen"],
+            "coleccion": coleccion,
+        }
+
+    raise HTTPException(404, "Funcionalidad desconocida (usa navegacion, notas o documentos).")
+
+
+class VectorizarRequest(BaseModel):
+    filenames: Optional[List[str]] = None
+
+
+@app.post("/api/docente/cursos/{courseid}/vectorizar", tags=["Docente"])
+async def docente_vectorizar(courseid: int, req: VectorizarRequest, request: Request):
+    auth.require_docente_curso(request, courseid)
+    if _docente_jobs.get(courseid):
+        raise HTTPException(409, "Ya hay una vectorización en curso para este curso.")
+
+    coleccion = await db.run(rds.resolve_collection_para_curso, courseid)
+    if not coleccion:
+        coleccion = f"Curso_{courseid}"
+        await _create_normal_collection(
+            coleccion,
+            courseid,
+            settings.DOCENTE_DEFAULT_DENSE,
+            settings.DOCENTE_DEFAULT_SPARSE,
+            distance="Cosine",
+            description=f"Colección normal del curso {courseid} (asistente Idania).",
+        )
+
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    if req.filenames is None:
+        data = await _conocimiento_payload(courseid, coleccion, asistente["id"] if asistente else None)
+        filenames = [
+            a["filename"]
+            for m in data["modules"]
+            for a in m["files"]
+            if a["estado"] == "pendiente"
+        ]
+    else:
+        filenames = [f for f in req.filenames if f]
+
+    if not filenames:
+        return {"job_id": None, "encolados": 0}
+
+    # Registro inmediato para que la UI vea el estado antes de que el job
+    # real exista (download_and_validate lo crea después).
+    _docente_jobs[courseid] = "__starting__"
+    asyncio.create_task(
+        _vectorizar_curso_docente(courseid, coleccion, settings.DOCENTE_DEFAULT_DENSE, filenames)
+    )
+    return {"job_id": None, "encolados": len(filenames)}
+
+
+@app.get("/api/docente/cursos/{courseid}/vectorizar/estado", tags=["Docente"])
+async def docente_vectorizar_estado(courseid: int, request: Request):
+    auth.require_docente_curso(request, courseid)
+    jid = _docente_jobs.get(courseid)
+    if not jid:
+        return {"job_id": None, "estado": "inactivo", "progreso": 0}
+    if jid == "__starting__":
+        return {"job_id": None, "estado": "iniciando", "progreso": 0}
+    job = get_job(jid) or {}
+    return {
+        "job_id": jid,
+        "estado": job.get("status") or "desconocido",
+        "progreso": 1 if job.get("status") == "completado" else 0,
+        "message": job.get("message"),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -797,6 +1683,156 @@ async def moodle_curso_estructura_endpoint(
     }
 
 
+async def _kn_fechas(courseid: int) -> Dict[str, Any]:
+    """Fechas de entrega reales de Moodle (helper compartido admin/docente)."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, lambda: moodle_calendar.get_due_dates(courseid)
+    )
+
+
+async def _kn_estructura(courseid: int, coleccion: Optional[str]) -> Dict[str, Any]:
+    """Course Map + estado de cada actividad (helper compartido admin/docente)."""
+    loop = asyncio.get_event_loop()
+    try:
+        course = await loop.run_in_executor(
+            None, lambda: course_map.get_course_map(courseid)
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Error consultando Moodle: {e}")
+    cache = await db.run(
+        db.fetch_one,
+        "SELECT fetched_at, invalidated_at, ttl_minutes FROM course_map_cache WHERE moodle_courseid = %s",
+        (courseid,),
+    )
+    archivos = await db.run(ledger.list_curso_archivos, coleccion) if coleccion else []
+    asistente = await db.run(assistants.get_asistente_para_curso, courseid)
+    excluidos = set()
+    if asistente:
+        excluidos = set(await db.run(assistants.get_excluded_filenames, asistente["id"], courseid))
+    por_resource = {r["resource_id"]: r for r in archivos if r.get("resource_id")}
+
+    def _considerado(a):
+        reg = por_resource.get(a.cmid)
+        if reg:
+            if reg.get("filename") in excluidos:
+                return "Excluido por el docente"
+            if reg.get("estado") == "vectorizado":
+                return "Vectorizado"
+            if reg.get("estado") == "no_soportado":
+                return "No soportado"
+            return "No vectorizado"
+        return "Solo estructura"
+
+    semana_actual = None
+    if coleccion:
+        try:
+            sw = await loop.run_in_executor(
+                None, lambda: query_router.get_current_week_summary(coleccion, courseid)
+            )
+            if isinstance(sw, dict):
+                semana_actual = sw.get("week_number")
+        except Exception:
+            semana_actual = None
+
+    return {
+        "coleccion": coleccion,
+        "fetched_at": getattr(course, "fetched_at", None),
+        "cache": cache,
+        "semana_actual": semana_actual,
+        "sections": [
+            {
+                "section_number": s.section_number,
+                "name": s.name,
+                "visible": s.visible,
+                "summary": getattr(s, "summary", "") or "",
+                "activities": [
+                    {
+                        "cmid": a.cmid,
+                        "name": a.name,
+                        "modname": a.modname,
+                        "url": a.url,
+                        "visible": a.visible,
+                        "uservisible": getattr(a, "uservisible", None),
+                        "considerado": _considerado(a),
+                    }
+                    for a in s.activities
+                ],
+            }
+            for s in course.sections
+        ],
+    }
+
+
+@app.get("/api/admin/cursos/{courseid}/conocimiento", tags=["Admin"])
+async def admin_conocimiento(
+    courseid: int,
+    seccion: str = Query("estructura", description="estructura|general|campos|fechas|archivos|autoridad"),
+    collection_name: Optional[str] = Query(None),
+    document: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user=Depends(auth.require_admin),
+):
+    """Visor de lo que el sistema SABE y USA de un curso (solo admin). Una
+    sección por llamada, para que el fallo de una no tumbe las demás."""
+    loop = asyncio.get_event_loop()
+    coleccion = collection_name or await db.run(rds.resolve_collection_para_curso, courseid)
+
+    if seccion == "general":
+        campos = await loop.run_in_executor(
+            None, lambda: course_map.parse_general_section_fields(courseid)
+        )
+        indexados: List[Dict[str, Any]] = []
+        if coleccion:
+            try:
+                indexados = await loop.run_in_executor(
+                    None, lambda: campos_estructurados.list_general_section_fields(coleccion)
+                )
+            except Exception:
+                indexados = []
+        return {
+            "seccion": "general", "course_id": courseid, "coleccion": coleccion,
+            "campos_generales": campos, "campos_generales_indexados": indexados,
+        }
+
+    if seccion == "fechas":
+        data = await _kn_fechas(courseid)
+        return {"seccion": "fechas", "course_id": courseid, **data}
+
+    if seccion == "archivos":
+        archivos = await db.run(ledger.list_curso_archivos, coleccion) if coleccion else []
+        return {
+            "seccion": "archivos", "course_id": courseid,
+            "coleccion": coleccion, "archivos": archivos,
+        }
+
+    if seccion == "campos":
+        if not coleccion:
+            return {"seccion": "campos", "course_id": courseid, "coleccion": None, "total": 0, "rows": []}
+        try:
+            data = await loop.run_in_executor(
+                None,
+                lambda: campos_estructurados.list_rows(
+                    coleccion, document=document, q=q, limit=limit, offset=offset
+                ),
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Error leyendo el índice de campos: {e}")
+        return {"seccion": "campos", "course_id": courseid, "coleccion": coleccion, **data}
+
+    if seccion == "autoridad":
+        rows = await db.run(
+            db.fetch_all,
+            "SELECT source_type, prioridad, activo, updated_at FROM fuente_autoridad ORDER BY prioridad",
+        )
+        return {"seccion": "autoridad", "course_id": courseid, "autoridad": rows}
+
+    # estructura (default): desde course_map_cache, no de Moodle en vivo.
+    data = await _kn_estructura(courseid, coleccion)
+    return {"seccion": "estructura", "course_id": courseid, **data}
+
+
 @app.post("/api/moodle/curso/{courseid}/sincronizar-general", tags=["RD"])
 async def moodle_sincronizar_general_endpoint(courseid: int, collection_name: str = Query(...)):
     """Dispara manualmente campos_estructurados.sync_general_section_fields()
@@ -887,6 +1923,9 @@ class AsistenteCreateRequest(BaseModel):
     # Se muestra (no se guarda) al reabrir una conversación con historial.
     mensaje_reencuentro: Optional[str] = None
     max_actividades_sesion: int = 10
+    func_notas: bool = True
+    func_documentos: bool = True
+    func_navegacion: bool = True
     # None/omitido = se genera uno aleatorio como antes; si se pasa, se usa
     # tal cual (rechaza si ya lo tiene otro asistente).
     token: Optional[str] = None
@@ -911,6 +1950,9 @@ class AsistenteUpdateRequest(BaseModel):
     mensaje_bienvenida: Optional[str] = None
     mensaje_reencuentro: Optional[str] = None
     max_actividades_sesion: Optional[int] = None
+    func_notas: Optional[bool] = None
+    func_documentos: Optional[bool] = None
+    func_navegacion: Optional[bool] = None
     # Cambiar el token invalida cualquier enlace ya compartido con el viejo.
     token: Optional[str] = None
 
@@ -918,6 +1960,12 @@ class AsistenteUpdateRequest(BaseModel):
 @app.get("/api/asistentes", tags=["Asistentes"])
 async def list_asistentes_endpoint():
     return {"asistentes": await db.run(assistants.list_asistentes)}
+
+
+@app.get("/api/asistentes/plantilla", tags=["Asistentes"])
+async def get_plantilla_asistente(user=Depends(auth.require_admin)):
+    """Plantilla "Idania" (prompt y saludos) para precargar el wizard/edición."""
+    return _load_plantilla_idania()
 
 
 @app.get("/api/asistentes/{asistente_id}", tags=["Asistentes"])
@@ -934,6 +1982,9 @@ async def create_asistente_endpoint(req: AsistenteCreateRequest, user=Depends(au
     strategy_kwargs["mensaje_bienvenida"] = req.mensaje_bienvenida
     strategy_kwargs["mensaje_reencuentro"] = req.mensaje_reencuentro
     strategy_kwargs["max_actividades_sesion"] = req.max_actividades_sesion
+    strategy_kwargs["func_notas"] = req.func_notas
+    strategy_kwargs["func_documentos"] = req.func_documentos
+    strategy_kwargs["func_navegacion"] = req.func_navegacion
     try:
         return await db.run(
             assistants.create_asistente,
@@ -963,6 +2014,7 @@ async def update_asistente_endpoint(asistente_id: int, req: AsistenteUpdateReque
         for k in (
             *_ASISTENTE_STRATEGY_FIELDS, "mensaje_bienvenida", "mensaje_reencuentro",
             "max_actividades_sesion", "rd_id", "moodle_courseid",
+            "func_notas", "func_documentos", "func_navegacion",
         )
         if k in fields
     }
@@ -1070,6 +2122,7 @@ async def asistente_chat_page(
     ),
     documento: Optional[str] = Query(None, description="Alternativa a userid para un visitante sin cuenta de Moodle."),
     nombre: Optional[str] = Query(None, description="Nombre para saludar — se pide junto con `documento`."),
+    prueba: Optional[str] = Query(None, description="'1' = conversación de prueba del docente (no cuenta en estadísticas)."),
 ):
     asistente = await db.run(assistants.get_asistente_by_token, token)
     if not asistente:
@@ -1081,7 +2134,37 @@ async def asistente_chat_page(
 
     documento = (documento or "").strip()
     nombre = (nombre or "").strip()
-    if userid is None and not (documento and nombre):
+
+    # ── Modo prueba (botón "Probar chat"): misma cookie del gestor ─────────
+    usuario_gestor = request.session.get("user")
+    es_prueba = bool(
+        usuario_gestor and (prueba or "").strip().lower() in ("1", "true", "si", "sí")
+    )
+    if es_prueba:
+        rol_gestor = usuario_gestor.get("rol") or (
+            "admin" if usuario_gestor.get("is_admin") else "docente"
+        )
+        if rol_gestor != "admin" and not usuario_gestor.get("is_admin"):
+            try:
+                auth.require_docente_curso(
+                    request, courseid or asistente.get("moodle_courseid")
+                )
+            except HTTPException:
+                es_prueba = False  # sin acceso: se ignora `prueba`
+
+    if es_prueba:
+        rol_gestor = usuario_gestor.get("rol") or (
+            "admin" if usuario_gestor.get("is_admin") else "docente"
+        )
+        if rol_gestor == "admin" or usuario_gestor.get("is_admin"):
+            effective_userid = -int(usuario_gestor["id"])
+        else:
+            effective_userid = int(
+                usuario_gestor.get("moodle_userid") or -int(usuario_gestor["id"])
+            )
+        moodle_username = usuario_gestor.get("username")
+        fullname = usuario_gestor.get("nombre") or moodle_username
+    elif userid is None and not (documento and nombre):
         # Sin userid de Moodle ni documento+nombre todavía: pide identificación
         # antes de crear ninguna sesión (ver el bloque `necesita_identificacion`
         # en asistente_chat.html).
@@ -1110,16 +2193,28 @@ async def asistente_chat_page(
             status_code=404,
         )
 
-    if userid is not None:
-        effective_userid = userid
-        loop = asyncio.get_event_loop()
-        moodle_info = await loop.run_in_executor(None, get_moodle_user_info, userid)
-        moodle_username = moodle_info["username"]
-        fullname = moodle_info["fullname"]
-    else:
-        effective_userid = _userid_from_documento(documento)
-        moodle_username = documento
-        fullname = nombre
+    # Activación POR CURSO (override del docente): no afecta a las demás
+    # aulas de la RD ni al asistente global.
+    courseid_cfg = asistente["moodle_courseid"] if asistente["rd_id"] is None else courseid
+    cfg_curso = await db.run(assistants.get_curso_config, asistente["id"], courseid_cfg or 0)
+    if cfg_curso is not None and cfg_curso.get("activo") is False:
+        return templates.TemplateResponse(
+            "asistente_chat.html",
+            {"request": request, "error": "Este asistente no está habilitado para este curso."},
+            status_code=403,
+        )
+
+    if not es_prueba:
+        if userid is not None:
+            effective_userid = userid
+            loop = asyncio.get_event_loop()
+            moodle_info = await loop.run_in_executor(None, get_moodle_user_info, userid)
+            moodle_username = moodle_info["username"]
+            fullname = moodle_info["fullname"]
+        else:
+            effective_userid = _userid_from_documento(documento)
+            moodle_username = documento
+            fullname = nombre
     week_info = await db.run(_safe_week_info, collection_name, courseid)
     saludo = assistants.compose_saludo(asistente["nombre"], asistente.get("mensaje_bienvenida"), fullname, week_info)
 
@@ -1127,9 +2222,10 @@ async def asistente_chat_page(
     # muestra (no se guarda) el mensaje de reencuentro en vez del saludo.
     existing_sesion = await db.run(
         db.fetch_one,
-        "SELECT id FROM asistente_sesiones WHERE asistente_id=%s AND moodle_courseid=%s AND moodle_userid=%s "
+        "SELECT id FROM asistente_sesiones WHERE asistente_id=%s AND moodle_courseid=%s "
+        "AND moodle_userid=%s AND es_prueba=%s "
         "ORDER BY started_at DESC LIMIT 1",
-        (asistente["id"], courseid, effective_userid),
+        (asistente["id"], courseid, effective_userid, es_prueba),
     )
     tenia_historial = False
     if existing_sesion:
@@ -1138,6 +2234,7 @@ async def asistente_chat_page(
     sesion = await db.run(
         assistants.get_or_create_sesion,
         asistente["id"], courseid, effective_userid, moodle_username, fullname, collection_name, saludo,
+        False, es_prueba, usuario_gestor.get("id") if es_prueba else None,
     )
     historial_rows = await db.run(assistants.get_mensajes, sesion["id"])
     # El saludo (siempre el primer mensaje, ver assistants.split_welcome) se
@@ -1172,8 +2269,12 @@ async def asistente_chat_page(
             "saludo": saludo,
             "historial": historial,
             "reencuentro": reencuentro,
-            "max_actividades_sesion": asistente.get("max_actividades_sesion", 10),
+            "max_actividades_sesion": (
+                50 if es_prueba
+                else (cfg_curso["max_actividades_sesion"] if cfg_curso else asistente.get("max_actividades_sesion", 10))
+            ),
             "preguntas_usadas": await db.run(assistants.count_preguntas, sesion["id"]),
+            "es_prueba": es_prueba,
             "courseid": courseid,
             "userid": effective_userid,
         },
@@ -1198,7 +2299,17 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
     if not req.pregunta or not req.pregunta.strip():
         raise HTTPException(400, "La pregunta no puede estar vacía.")
 
-    max_actividades = asistente.get("max_actividades_sesion") or 10
+    courseid_sesion = sesion.get("moodle_courseid") or 0
+    cfg = await db.run(assistants.get_curso_config, asistente["id"], courseid_sesion)
+    if cfg is not None and cfg.get("activo") is False:
+        raise HTTPException(403, "Este asistente está deshabilitado para este curso.")
+    if sesion.get("es_prueba"):
+        # En modo prueba el docente puede conversar más allá del tope normal.
+        max_actividades = 50
+    elif cfg is not None and cfg.get("max_actividades_sesion") is not None:
+        max_actividades = int(cfg["max_actividades_sesion"])
+    else:
+        max_actividades = asistente.get("max_actividades_sesion") or 10
     preguntas_usadas = await db.run(assistants.count_preguntas, req.sesion_id)
     if preguntas_usadas >= max_actividades:
         raise HTTPException(
@@ -1208,7 +2319,8 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
         )
 
     # Se obtiene el historial ANTES de guardar la pregunta actual, para no
-    # duplicarla (memoria de hasta 30 pares pregunta/respuesta).
+    # duplicarla (memoria acotada: 6 pares y solo las últimas 6 horas — un
+    # historial viejo contaminaba la respuesta copiando enlaces/temas previos).
     history = await db.run(assistants.get_recent_history, req.sesion_id)
     await db.run(assistants.save_mensaje, req.sesion_id, "user", req.pregunta)
 
@@ -1222,6 +2334,18 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
     # assistants.create_asistente). Si tampoco hay eso, recién ahí usa el
     # valor por defecto del sistema.
     rd = await db.run(rds.get_rd_for_collection, sesion["qdrant_collection_name"]) or {}
+
+    # Configuración y exclusiones POR CURSO (override del docente). Si no hay
+    # override, se usan los valores globales del asistente — mismo
+    # comportamiento que antes. `cfg` ya se cargó arriba (tope de preguntas).
+    funcionalidades = {
+        "notas": bool(cfg["func_notas"] if cfg else asistente.get("func_notas", True)),
+        "documentos": bool(cfg["func_documentos"] if cfg else asistente.get("func_documentos", True)),
+        "navegacion": bool(cfg["func_navegacion"] if cfg else asistente.get("func_navegacion", True)),
+    }
+    excluded_filenames = await db.run(
+        assistants.get_excluded_filenames, asistente["id"], courseid_sesion
+    )
 
     try:
         result = await rag_pipeline.answer_query(
@@ -1243,6 +2367,8 @@ async def asistente_enviar_mensaje(token: str, req: AsistenteMensajeRequest):
             # venga del cliente en la pregunta misma, para que PROGRESS no
             # pueda usarse para consultar el avance de otro estudiante.
             user_id=sesion["moodle_userid"] or None,
+            funcionalidades=funcionalidades,
+            excluded_filenames=excluded_filenames,
         )
     except Exception as e:
         raise HTTPException(502, f"Error generando la respuesta: {e}")
@@ -2018,6 +3144,16 @@ async def test_credential_endpoint(field: str, req: TestCredentialRequest):
         return await credentials.test_credential(field, req.value)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/config/defaults-asistente", tags=["Configuración RAG"])
+async def get_defaults_asistente(user=Depends(auth.require_admin)):
+    """Embeddings por defecto que usa la creación de asistentes (docente y
+    admin) — evita que el wizard admin caiga al default global del sistema."""
+    return {
+        "dense": settings.DOCENTE_DEFAULT_DENSE,
+        "sparse": settings.DOCENTE_DEFAULT_SPARSE,
+    }
 
 
 @app.get("/api/config/{stage}", tags=["Configuración RAG"])
